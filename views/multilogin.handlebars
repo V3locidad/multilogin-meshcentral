@@ -163,11 +163,8 @@ async function loginOnNode(nodeid, login, pass, log) {
       log(`[${nodeid}] setup desktop.m : ${e.message}`);
     }
 
-    // Signal de readiness reel : onScreenSizeChange fire quand l'agent envoie ses infos
-    let screenReady = false;
-    try {
-      desktop.m.onScreenSizeChange = () => { screenReady = true; };
-    } catch (e) {}
+    // On polle desktop.m.ScreenWidth > 0 plutot que de hooker onScreenSizeChange
+    // (le callback peut etre ecrase par le redirecteur)
 
     let finished = false;
     const finish = (ok, msg) => {
@@ -193,20 +190,26 @@ async function loginOnNode(nodeid, login, pass, log) {
 
     (async () => {
       try {
-        // Attendre que l'AGENT envoie ses premieres donnees (onScreenSizeChange)
-        // C'est un signal beaucoup plus fiable que State === 3 qui peut etre instantane
-        log(`[${nodeid}] attente reception donnees agent (onScreenSizeChange)...`);
+        // Attendre que l'agent ait envoye la taille d'ecran (= il est dans la boucle KVM active)
+        log(`[${nodeid}] attente ScreenWidth > 0...`);
         const waitStart = Date.now();
-        while (!screenReady && (Date.now() - waitStart < 20000) && !finished) {
+        while ((!desktop.m.ScreenWidth || desktop.m.ScreenWidth === 0)
+               && (Date.now() - waitStart < 20000) && !finished) {
           await sleep(200);
         }
         if (finished) return;
-        if (!screenReady) {
+        if (!desktop.m.ScreenWidth) {
           clearTimeout(timer);
-          return finish(false, `aucune donnee agent recue apres 20s (State=${desktop.m.State}, redirState=${desktop.State})`);
+          return finish(false, `pas de ScreenWidth apres 20s (State=${desktop.m.State}, FirstDraw=${desktop.m.FirstDraw})`);
         }
-        log(`[${nodeid}] agent pret (data recue apres ${Date.now()-waitStart}ms, State=${desktop.m.State})`);
-        await sleep(800);  // marge pour stabiliser
+        log(`[${nodeid}] agent pret (${desktop.m.ScreenWidth}x${desktop.m.ScreenHeight} apres ${Date.now()-waitStart}ms)`);
+
+        // Attendre que au moins un frame ait ete dessine (FirstDraw devient false apres draw)
+        const drawWaitStart = Date.now();
+        while (desktop.m.FirstDraw && (Date.now() - drawWaitStart < 5000)) await sleep(100);
+        log(`[${nodeid}] FirstDraw consomme (apres ${Date.now()-drawWaitStart}ms)`);
+
+        await sleep(1000);  // marge supplementaire
 
         log(`[${nodeid}] envoi Ctrl+Alt+Del`);
         desktop.m.SendCtrlAltDelMsg();
