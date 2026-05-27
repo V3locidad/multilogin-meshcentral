@@ -36,6 +36,8 @@
 
 <div class="toolbar">
   <button onclick="runMultiLogin()">Lancer la connexion sur les postes coches</button>
+  <button onclick="copyLog()">Copier le log</button>
+  <button onclick="clearLog()">Effacer le log</button>
 </div>
 
 <pre id="ml_log"></pre>
@@ -239,8 +241,10 @@ async function runMultiLogin() {
 
   const logEl = document.getElementById('ml_log');
   const log = (m) => {
-    logEl.textContent += m + '\n';
+    const line = `[${new Date().toLocaleTimeString()}] ${m}`;
+    logEl.textContent += line + '\n';
     logEl.scrollTop = logEl.scrollHeight;
+    try { console.log('[multilogin]', line); } catch (e) {}
   };
 
   log(`Lancement sur ${nodes.length} poste(s), ${MAX_PARALLEL} en parallele`);
@@ -266,6 +270,26 @@ function selectWindowsOnly() {
   document.querySelectorAll('#ml_nodes input[type=checkbox]').forEach(i => {
     i.checked = i.hasAttribute('data-win');
   });
+}
+
+function copyLog() {
+  const text = document.getElementById('ml_log').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    alert('Log copie dans le presse-papier (' + text.length + ' caracteres)');
+  }).catch(err => {
+    // Fallback : selection manuelle
+    const el = document.getElementById('ml_log');
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    alert('Selection faite, fais Cmd+C pour copier');
+  });
+}
+
+function clearLog() {
+  document.getElementById('ml_log').textContent = '';
 }
 
 // Cherche l'objet nodes en remontant les iframes parentes
