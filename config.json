@@ -1,0 +1,13 @@
+{
+  "name": "multilogin",
+  "shortName": "multilogin",
+  "version": "0.0.1",
+  "author": "julien",
+  "description": "Login automatique en masse sur postes Windows verrouilles via le KVM MeshCentral",
+  "hasAdminPanel": true,
+  "homepage": "",
+  "changelogUrl": "",
+  "downloadUrl": "",
+  "repository": { "type": "git", "url": "" },
+  "meshCentralCompat": ">=1.1.0"
+}

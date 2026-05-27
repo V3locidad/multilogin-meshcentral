@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Multi-Login KVM</title>
+<style>
+  body { font-family: sans-serif; padding: 12px; }
+  h2 { margin-top: 0; }
+  .row { margin-bottom: 10px; }
+  .row label { margin-right: 12px; }
+  #ml_nodes { max-height: 320px; overflow: auto; border: 1px solid #ccc; padding: 8px; }
+  #ml_nodes div { padding: 2px 0; }
+  #ml_log { background: #111; color: #0f0; padding: 8px; height: 240px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+  button { padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  .toolbar { margin: 10px 0; }
+  input[type=text], input[type=password] { padding: 4px 6px; }
+</style>
+</head>
+<body>
+
+<h2>Connexion multiple (KVM)</h2>
+
+<div class="row">
+  <label>Login : <input id="ml_user" type="text" autocomplete="off"></label>
+  <label>Mot de passe : <input id="ml_pass" type="password" autocomplete="new-password"></label>
+</div>
+
+<div class="toolbar">
+  <button onclick="selectAll(true)">Tout cocher</button>
+  <button onclick="selectAll(false)">Tout decocher</button>
+  <span id="ml_count" style="margin-left:10px;color:#666"></span>
+</div>
+
+<div id="ml_nodes">Chargement des postes...</div>
+
+<div class="toolbar">
+  <button onclick="runMultiLogin()">Lancer la connexion sur les postes coches</button>
+</div>
+
+<pre id="ml_log"></pre>
+
+<script>
+// ====================================================================
+// Multi-Login KVM - protocole MeshCentral
+// Format trame : [0x00, type, 0x00, size, ...payload]
+// Types utiles : KEY=1, COMPRESSION=5, PAUSE=8, CAD=10, KEYUNICODE=85
+// ====================================================================
+
+const MAX_PARALLEL = 6;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const bytes = (...arr) => new Uint8Array(arr);
+
+// --- helpers protocole ---
+
+// CAD : 4 octets, type 10
+function sendCAD(ws) {
+  ws.send(bytes(0x00, 10, 0x00, 0x04));
+}
+
+// KEYUNICODE : 7 octets, type 85. action 1=down -> 0, action 2=up -> 1
+function sendUnicode(ws, action, codepoint) {
+  ws.send(bytes(
+    0x00, 85, 0x00, 0x07,
+    action - 1,
+    (codepoint >> 8) & 0xFF,
+    codepoint & 0xFF
+  ));
+}
+
+// KEY (scancode XT) : 6 octets, type 1. action 0=down, 1=up
+function sendKey(ws, action, kc) {
+  ws.send(bytes(0x00, 1, 0x00, 0x06, action, kc));
+}
+
+// Init standard : compression + unpause
+function sendInit(ws) {
+  // type=1 (JPEG), level=50, scaling=1024 (0x0400), fps=100 (0x0064)
+  ws.send(bytes(0x00, 5, 0x00, 0x0A, 1, 50, 0x04, 0x00, 0x00, 0x64));
+  // Unpause
+  ws.send(bytes(0x00, 8, 0x00, 0x05, 0x00));
+}
+
+// Scancodes XT minimaux
+const SC_TAB = 0x0F;
+const SC_ENTER = 0x1C;
+
+async function typeText(ws, s, delayMs = 40) {
+  for (const ch of s) {
+    const cp = ch.charCodeAt(0);
+    sendUnicode(ws, 1, cp);
+    sendUnicode(ws, 2, cp);
+    await sleep(delayMs);
+  }
+}
+
+async function tapKey(ws, scancode) {
+  sendKey(ws, 0, scancode);
+  await sleep(30);
+  sendKey(ws, 1, scancode);
+}
+
+// --- logique principale ---
+
+async function loginOnNode(nodeid, login, pass, log) {
+  return new Promise((resolve) => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/meshrelay.ashx?browser=1&p=2&nodeid=${encodeURIComponent(nodeid)}`;
+
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      log(`[${nodeid}] WS exception : ${e}`);
+      return resolve(false);
+    }
+    ws.binaryType = 'arraybuffer';
+
+    const timer = setTimeout(() => {
+      log(`[${nodeid}] timeout 25s`);
+      try { ws.close(); } catch (e) {}
+      resolve(false);
+    }, 25000);
+
+    ws.onopen = async () => {
+      log(`[${nodeid}] WS ouvert`);
+      await sleep(1500);   // laisser le relay + agent KVM negocier
+      sendInit(ws);
+      await sleep(500);
+
+      sendCAD(ws);
+      await sleep(2000);   // attendre que Winlogon bascule sur saisie credentials
+
+      await typeText(ws, login);
+      await sleep(150);
+      await tapKey(ws, SC_TAB);
+      await sleep(200);
+      await typeText(ws, pass);
+      await sleep(200);
+      await tapKey(ws, SC_ENTER);
+      await sleep(1500);
+
+      clearTimeout(timer);
+      try { ws.close(); } catch (e) {}
+      log(`[${nodeid}] sequence envoyee`);
+      resolve(true);
+    };
+
+    ws.onerror = () => {
+      log(`[${nodeid}] WS erreur`);
+    };
+    ws.onclose = (ev) => {
+      // utile pour debug : log(`[${nodeid}] close code=${ev.code}`);
+    };
+  });
+}
+
+async function runMultiLogin() {
+  const login = document.getElementById('ml_user').value;
+  const pass  = document.getElementById('ml_pass').value;
+  if (!login || !pass) { alert('Login et mot de passe requis'); return; }
+
+  const nodes = [...document.querySelectorAll('#ml_nodes input[type=checkbox]:checked')]
+                  .map(i => i.value);
+  if (nodes.length === 0) { alert('Aucun poste coche'); return; }
+
+  const logEl = document.getElementById('ml_log');
+  const log = (m) => {
+    logEl.textContent += m + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  log(`Lancement sur ${nodes.length} poste(s), ${MAX_PARALLEL} en parallele`);
+
+  let i = 0;
+  async function worker() {
+    while (i < nodes.length) {
+      const id = nodes[i++];
+      await loginOnNode(id, login, pass, log);
+    }
+  }
+  await Promise.all(Array(Math.min(MAX_PARALLEL, nodes.length)).fill(0).map(worker));
+  log('--- termine ---');
+}
+
+// --- peuplement liste des postes ---
+
+function selectAll(state) {
+  document.querySelectorAll('#ml_nodes input[type=checkbox]').forEach(i => i.checked = state);
+}
+
+window.addEventListener('load', () => {
+  const container = document.getElementById('ml_nodes');
+  container.innerHTML = '';
+
+  let nodesObj = null;
+  try { nodesObj = parent.window.nodes; } catch (e) {}
+
+  if (!nodesObj) {
+    container.textContent = 'Impossible de recuperer la liste des postes (la vue doit etre chargee depuis l\'UI MeshCentral via l\'onglet Multi-Login).';
+    return;
+  }
+
+  let count = 0;
+  Object.values(nodesObj).forEach(n => {
+    if (!n || !n._id) return;
+    // n.agent.id == 1 => Windows. Si tu veux tous les OS, retire ce filtre.
+    if (n.agent && n.agent.id !== undefined && n.agent.id !== 1) return;
+    const div = document.createElement('div');
+    const safeName = (n.name || n._id).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    div.innerHTML = `<label><input type="checkbox" value="${n._id}"> ${safeName}</label>`;
+    container.appendChild(div);
+    count++;
+  });
+
+  document.getElementById('ml_count').textContent = `${count} poste(s) Windows detecte(s)`;
+  if (count === 0) container.textContent = 'Aucun poste Windows trouve dans parent.window.nodes';
+});
+</script>
+
+</body>
+</html>
