@@ -102,34 +102,77 @@ async function tapKey(ws, scancode) {
 
 // --- logique principale ---
 
+// Cherche meshserver dans les iframes parentes
+function findMeshserver() {
+  const tries = [];
+  try { tries.push(parent.meshserver); } catch (e) {}
+  try { tries.push(parent.parent.meshserver); } catch (e) {}
+  try { tries.push(top.meshserver); } catch (e) {}
+  for (const ms of tries) { if (ms && typeof ms.send === 'function') return ms; }
+  return null;
+}
+
+// Genere un id de tunnel aleatoire (compatible MeshCentral)
+function makeTunnelId() {
+  const arr = new Uint8Array(8);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function loginOnNode(nodeid, login, pass, log) {
   return new Promise((resolve) => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/meshrelay.ashx?browser=1&p=2&nodeid=${encodeURIComponent(nodeid)}`;
-
-    let ws;
-    try {
-      ws = new WebSocket(url);
-    } catch (e) {
-      log(`[${nodeid}] WS exception : ${e}`);
+    const ms = findMeshserver();
+    if (!ms) {
+      log(`[${nodeid}] ERREUR : meshserver introuvable dans parent.*`);
       return resolve(false);
     }
+
+    const tunnelId = makeTunnelId();
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const browserUrl = `${proto}//${location.host}/meshrelay.ashx?browser=1&p=2&nodeid=${encodeURIComponent(nodeid)}&id=${tunnelId}`;
+    const agentUrl = `*/meshrelay.ashx?p=2&nodeid=${encodeURIComponent(nodeid)}&id=${tunnelId}`;
+
+    // 1. Demande au serveur d'instruire l'agent d'ouvrir son cote du tunnel
+    try {
+      ms.send({ action: 'msg', type: 'tunnel', nodeid: nodeid, value: agentUrl, usage: 2 });
+    } catch (e) {
+      log(`[${nodeid}] ms.send erreur : ${e.message}`);
+      return resolve(false);
+    }
+
+    // 2. Ouvre le cote navigateur
+    let ws;
+    try { ws = new WebSocket(browserUrl); }
+    catch (e) { log(`[${nodeid}] WS exception : ${e}`); return resolve(false); }
     ws.binaryType = 'arraybuffer';
 
+    let firstMsgReceived = false;
     const timer = setTimeout(() => {
-      log(`[${nodeid}] timeout 25s`);
+      log(`[${nodeid}] timeout 20s (firstMsg=${firstMsgReceived})`);
       try { ws.close(); } catch (e) {}
       resolve(false);
-    }, 25000);
+    }, 20000);
+
+    ws.onmessage = (e) => {
+      const len = e.data.byteLength !== undefined ? e.data.byteLength : (e.data.length || 0);
+      if (!firstMsgReceived) {
+        firstMsgReceived = true;
+        log(`[${nodeid}] 1er msg recu (${len} octets) -> agent connecte`);
+      }
+    };
 
     ws.onopen = async () => {
-      log(`[${nodeid}] WS ouvert`);
-      await sleep(1500);   // laisser le relay + agent KVM negocier
+      log(`[${nodeid}] WS ouvert, attente connexion agent...`);
+      // Attendre que l'agent ait connecte son cote (premier message recu, ou 3s max)
+      const waitStart = Date.now();
+      while (!firstMsgReceived && (Date.now() - waitStart) < 3000) { await sleep(100); }
+      if (!firstMsgReceived) log(`[${nodeid}] aucun message agent apres 3s, on tente quand meme`);
+
       sendInit(ws);
       await sleep(500);
 
       sendCAD(ws);
-      await sleep(2000);   // attendre que Winlogon bascule sur saisie credentials
+      await sleep(2500);
 
       await typeText(ws, login);
       await sleep(150);
@@ -146,12 +189,8 @@ async function loginOnNode(nodeid, login, pass, log) {
       resolve(true);
     };
 
-    ws.onerror = () => {
-      log(`[${nodeid}] WS erreur`);
-    };
-    ws.onclose = (ev) => {
-      // utile pour debug : log(`[${nodeid}] close code=${ev.code}`);
-    };
+    ws.onerror = () => log(`[${nodeid}] WS erreur`);
+    ws.onclose = (ev) => log(`[${nodeid}] close code=${ev.code}${ev.reason ? ' reason='+ev.reason : ''}`);
   });
 }
 
