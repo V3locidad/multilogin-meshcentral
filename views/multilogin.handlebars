@@ -27,6 +27,7 @@
 
 <div class="toolbar">
   <button onclick="selectAll(true)">Tout cocher</button>
+  <button onclick="selectWindowsOnly()">Cocher Windows uniquement</button>
   <button onclick="selectAll(false)">Tout decocher</button>
   <span id="ml_count" style="margin-left:10px;color:#666"></span>
 </div>
@@ -188,32 +189,74 @@ function selectAll(state) {
   document.querySelectorAll('#ml_nodes input[type=checkbox]').forEach(i => i.checked = state);
 }
 
+function selectWindowsOnly() {
+  document.querySelectorAll('#ml_nodes input[type=checkbox]').forEach(i => {
+    i.checked = i.hasAttribute('data-win');
+  });
+}
+
+// Cherche l'objet nodes en remontant les iframes parentes
+function findNodes() {
+  const candidates = [];
+  try { candidates.push(['parent.nodes', parent.nodes]); } catch (e) {}
+  try { candidates.push(['parent.window.nodes', parent.window.nodes]); } catch (e) {}
+  try { candidates.push(['top.nodes', top.nodes]); } catch (e) {}
+  try { candidates.push(['top.window.nodes', top.window.nodes]); } catch (e) {}
+  try { candidates.push(['parent.parent.nodes', parent.parent.nodes]); } catch (e) {}
+  try { candidates.push(['parent.parent.window.nodes', parent.parent.window.nodes]); } catch (e) {}
+
+  for (const [name, obj] of candidates) {
+    if (obj && typeof obj === 'object' && Object.keys(obj).length > 0) {
+      return { obj, source: name };
+    }
+  }
+  return { obj: null, source: null, tried: candidates.map(c => c[0]) };
+}
+
+// Detection OS : agent.id 1-4 et 13 = Windows
+const WINDOWS_AGENT_IDS = new Set([1, 2, 3, 4, 13]);
+
+function osLabel(agentId) {
+  if (WINDOWS_AGENT_IDS.has(agentId)) return 'Win';
+  if ([5, 6, 14, 16, 19].includes(agentId)) return 'Linux';
+  if ([11, 17].includes(agentId)) return 'Mac';
+  return '?';
+}
+
 window.addEventListener('load', () => {
   const container = document.getElementById('ml_nodes');
   container.innerHTML = '';
 
-  let nodesObj = null;
-  try { nodesObj = parent.window.nodes; } catch (e) {}
-
-  if (!nodesObj) {
-    container.textContent = 'Impossible de recuperer la liste des postes (la vue doit etre chargee depuis l\'UI MeshCentral via l\'onglet Multi-Login).';
+  const result = findNodes();
+  if (!result.obj) {
+    container.innerHTML = '<div style="color:red">Impossible de trouver l\'objet nodes. Chemins essayes :<br>'
+      + result.tried.join('<br>') + '</div>';
     return;
   }
 
-  let count = 0;
+  const nodesObj = result.obj;
+  let countWin = 0, countOther = 0;
+
   Object.values(nodesObj).forEach(n => {
     if (!n || !n._id) return;
-    // n.agent.id == 1 => Windows. Si tu veux tous les OS, retire ce filtre.
-    if (n.agent && n.agent.id !== undefined && n.agent.id !== 1) return;
+    const agentId = n.agent ? n.agent.id : undefined;
+    const os = osLabel(agentId);
+    const isWin = WINDOWS_AGENT_IDS.has(agentId);
+    if (isWin) countWin++; else countOther++;
+
     const div = document.createElement('div');
     const safeName = (n.name || n._id).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-    div.innerHTML = `<label><input type="checkbox" value="${n._id}"> ${safeName}</label>`;
+    const tag = `<span style="color:${isWin ? '#080' : '#888'};font-size:11px;margin-left:6px">[${os}]</span>`;
+    div.innerHTML = `<label><input type="checkbox" value="${n._id}" ${isWin ? 'data-win="1"' : ''}> ${safeName} ${tag}</label>`;
     container.appendChild(div);
-    count++;
   });
 
-  document.getElementById('ml_count').textContent = `${count} poste(s) Windows detecte(s)`;
-  if (count === 0) container.textContent = 'Aucun poste Windows trouve dans parent.window.nodes';
+  document.getElementById('ml_count').textContent =
+    `${countWin} Windows + ${countOther} autres (source : ${result.source})`;
+
+  if (countWin + countOther === 0) {
+    container.textContent = 'Objet nodes trouve mais vide';
+  }
 });
 </script>
 
