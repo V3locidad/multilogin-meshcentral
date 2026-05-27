@@ -8,12 +8,16 @@
   h2 { margin-top: 0; }
   .row { margin-bottom: 10px; }
   .row label { margin-right: 12px; }
-  #ml_nodes { max-height: 320px; overflow: auto; border: 1px solid #ccc; padding: 8px; }
-  #ml_nodes div { padding: 2px 0; }
+  .panes { display: flex; gap: 12px; margin: 10px 0; }
+  #ml_groups { flex: 0 0 280px; max-height: 380px; overflow: auto; border: 1px solid #ccc; padding: 8px; background: #f8f8f8; }
+  #ml_nodes { flex: 1; max-height: 380px; overflow: auto; border: 1px solid #ccc; padding: 8px; }
+  #ml_groups div, #ml_nodes div { padding: 2px 0; }
+  #ml_groups .pane-title, #ml_nodes .pane-title { font-weight: bold; margin-bottom: 6px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
   #ml_log { background: #111; color: #0f0; padding: 8px; height: 240px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
   button { padding: 8px 16px; font-size: 14px; cursor: pointer; }
   .toolbar { margin: 10px 0; }
   input[type=text], input[type=password] { padding: 4px 6px; }
+  .search { width: 100%; padding: 4px 6px; margin-bottom: 6px; box-sizing: border-box; }
 </style>
 </head>
 <body>
@@ -32,7 +36,18 @@
   <span id="ml_count" style="margin-left:10px;color:#666"></span>
 </div>
 
-<div id="ml_nodes">Chargement des postes...</div>
+<div class="panes">
+  <div id="ml_groups">
+    <div class="pane-title">Groupes</div>
+    <input type="text" id="ml_search_groups" class="search" placeholder="Filtrer les groupes..." oninput="filterGroups()">
+    <div id="ml_groups_list">Chargement...</div>
+  </div>
+  <div id="ml_nodes">
+    <div class="pane-title">Postes</div>
+    <input type="text" id="ml_search_nodes" class="search" placeholder="Filtrer les postes..." oninput="filterNodes()">
+    <div id="ml_nodes_list">Chargement...</div>
+  </div>
+</div>
 
 <div class="toolbar">
   <button onclick="runMultiLogin()">Lancer la connexion sur les postes coches</button>
@@ -382,7 +397,7 @@ async function runMultiLogin() {
   const pass  = document.getElementById('ml_pass').value;
   if (!login || !pass) { alert('Login et mot de passe requis'); return; }
 
-  const nodes = [...document.querySelectorAll('#ml_nodes input[type=checkbox]:checked')]
+  const nodes = [...document.querySelectorAll('.ml_node_cb:checked')]
                   .map(i => i.value);
   if (nodes.length === 0) { alert('Aucun poste coche'); return; }
 
@@ -418,12 +433,22 @@ async function runMultiLogin() {
 // --- peuplement liste des postes ---
 
 function selectAll(state) {
-  document.querySelectorAll('#ml_nodes input[type=checkbox]').forEach(i => i.checked = state);
+  document.querySelectorAll('.ml_node_cb').forEach(i => i.checked = state);
+  document.querySelectorAll('.ml_group_cb').forEach(i => { i.checked = state; i.indeterminate = false; });
 }
 
 function selectWindowsOnly() {
-  document.querySelectorAll('#ml_nodes input[type=checkbox]').forEach(i => {
+  document.querySelectorAll('.ml_node_cb').forEach(i => {
     i.checked = i.hasAttribute('data-win');
+  });
+  // Resynchroniser l'etat des groupes
+  document.querySelectorAll('.ml_group_cb').forEach(gcb => {
+    const mid = gcb.dataset.meshid;
+    const all = document.querySelectorAll(`.ml_node_cb[data-meshid="${CSS.escape(mid)}"]`);
+    const allChecked = Array.from(all).every(cb => cb.checked);
+    const someChecked = Array.from(all).some(cb => cb.checked);
+    gcb.checked = allChecked;
+    gcb.indeterminate = !allChecked && someChecked;
   });
 }
 
@@ -492,52 +517,123 @@ function osLabel(agentId) {
   return '?';
 }
 
-window.addEventListener('load', () => {
-  const container = document.getElementById('ml_nodes');
-  container.innerHTML = '';
+function findMeshes() {
+  try { if (parent.meshes) return parent.meshes; } catch (e) {}
+  try { if (top.meshes) return top.meshes; } catch (e) {}
+  try { if (parent.parent.meshes) return parent.parent.meshes; } catch (e) {}
+  return null;
+}
+
+const escapeHTML = (s) => String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+
+function buildUI() {
+  const nodesList = document.getElementById('ml_nodes_list');
+  const groupsList = document.getElementById('ml_groups_list');
+  nodesList.innerHTML = '';
+  groupsList.innerHTML = '';
 
   const result = findNodes();
   if (!result.obj) {
-    container.innerHTML = '<div style="color:red">Impossible de trouver l\'objet nodes. Chemins essayes :<br>'
-      + result.tried.join('<br>') + '</div>';
+    nodesList.innerHTML = '<div style="color:red">nodes introuvable. Essayes :<br>' + result.tried.join('<br>') + '</div>';
     return;
   }
-
   const nodesObj = result.obj;
+  const meshesObj = findMeshes() || {};
+
+  // Regroupe les nodes par meshid
+  const nodesByMesh = {};
   let countWin = 0, countOther = 0;
-
-  // Etat de connexion (online) : nodes peut contenir node.conn (bitmap) ou
-  // on utilise parent.powerStatus / parent.nodes[id].state
-  let powerState = {};
-  try { powerState = result.obj === parent.nodes ? (parent.powerStatus || {}) : {}; } catch (e) {}
-
   Object.values(nodesObj).forEach(n => {
     if (!n || !n._id) return;
+    const mid = n.meshid || '__nogroup__';
+    if (!nodesByMesh[mid]) nodesByMesh[mid] = [];
+    nodesByMesh[mid].push(n);
+    const isWin = WINDOWS_AGENT_IDS.has(n.agent ? n.agent.id : undefined);
+    if (isWin) countWin++; else countOther++;
+  });
+
+  // Tri par nom de groupe
+  const meshIds = Object.keys(nodesByMesh).sort((a, b) => {
+    const na = (meshesObj[a] && meshesObj[a].name) || a;
+    const nb = (meshesObj[b] && meshesObj[b].name) || b;
+    return na.localeCompare(nb);
+  });
+
+  // ----- Panneau Groupes -----
+  meshIds.forEach(mid => {
+    const mesh = meshesObj[mid] || { name: '(sans groupe)' };
+    const nodes = nodesByMesh[mid];
+    const div = document.createElement('div');
+    div.dataset.meshname = (mesh.name || mid).toLowerCase();
+    div.innerHTML = `<label><input type="checkbox" class="ml_group_cb" data-meshid="${escapeHTML(mid)}"> ${escapeHTML(mesh.name)} <span style="color:#888;font-size:11px">(${nodes.length})</span></label>`;
+    groupsList.appendChild(div);
+  });
+
+  // Tri postes par nom dans chaque groupe et affichage flat
+  const allNodesSorted = [].concat(...meshIds.map(mid => nodesByMesh[mid].slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''))));
+
+  allNodesSorted.forEach(n => {
     const agentId = n.agent ? n.agent.id : undefined;
     const os = osLabel(agentId);
     const isWin = WINDOWS_AGENT_IDS.has(agentId);
-    if (isWin) countWin++; else countOther++;
-
-    // online si conn & 1 (agent connected)
     const online = (n.conn !== undefined) ? ((n.conn & 1) === 1) : false;
+    const meshName = (meshesObj[n.meshid] && meshesObj[n.meshid].name) || '?';
 
     const div = document.createElement('div');
-    const safeName = (n.name || n._id).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    div.dataset.nodename = (n.name || '').toLowerCase();
+    div.dataset.meshid = n.meshid || '';
     const osTag = `<span style="color:${isWin ? '#080' : '#888'};font-size:11px;margin-left:6px">[${os}]</span>`;
     const onTag = online
       ? '<span style="color:#080;font-size:11px;margin-left:4px">●</span>'
       : '<span style="color:#c00;font-size:11px;margin-left:4px">○</span>';
-    div.innerHTML = `<label><input type="checkbox" value="${n._id}" ${isWin ? 'data-win="1"' : ''} ${online ? 'data-online="1"' : ''}> ${onTag} ${safeName} ${osTag}</label>`;
-    container.appendChild(div);
+    const meshTag = `<span style="color:#888;font-size:10px;margin-left:8px">${escapeHTML(meshName)}</span>`;
+    div.innerHTML = `<label><input type="checkbox" class="ml_node_cb" value="${escapeHTML(n._id)}" data-meshid="${escapeHTML(n.meshid || '')}" ${isWin ? 'data-win="1"' : ''} ${online ? 'data-online="1"' : ''}> ${onTag} ${escapeHTML(n.name || n._id)} ${osTag} ${meshTag}</label>`;
+    nodesList.appendChild(div);
   });
 
   document.getElementById('ml_count').textContent =
-    `${countWin} Windows + ${countOther} autres (source : ${result.source})`;
+    `${countWin} Windows + ${countOther} autres dans ${meshIds.length} groupe(s)`;
 
-  if (countWin + countOther === 0) {
-    container.textContent = 'Objet nodes trouve mais vide';
-  }
-});
+  // Listener pour synchroniser groupes -> nodes
+  document.querySelectorAll('.ml_group_cb').forEach(gcb => {
+    gcb.addEventListener('change', () => {
+      const mid = gcb.dataset.meshid;
+      document.querySelectorAll(`.ml_node_cb[data-meshid="${CSS.escape(mid)}"]`).forEach(ncb => {
+        ncb.checked = gcb.checked;
+      });
+    });
+  });
+
+  // Listener inverse : si tous les nodes d'un groupe sont coches, cocher le groupe
+  document.querySelectorAll('.ml_node_cb').forEach(ncb => {
+    ncb.addEventListener('change', () => {
+      const mid = ncb.dataset.meshid;
+      const groupCb = document.querySelector(`.ml_group_cb[data-meshid="${CSS.escape(mid)}"]`);
+      if (!groupCb) return;
+      const allInMesh = document.querySelectorAll(`.ml_node_cb[data-meshid="${CSS.escape(mid)}"]`);
+      const allChecked = Array.from(allInMesh).every(cb => cb.checked);
+      const someChecked = Array.from(allInMesh).some(cb => cb.checked);
+      groupCb.checked = allChecked;
+      groupCb.indeterminate = !allChecked && someChecked;
+    });
+  });
+}
+
+function filterGroups() {
+  const q = document.getElementById('ml_search_groups').value.toLowerCase();
+  document.querySelectorAll('#ml_groups_list div').forEach(d => {
+    d.style.display = (!q || (d.dataset.meshname || '').includes(q)) ? '' : 'none';
+  });
+}
+
+function filterNodes() {
+  const q = document.getElementById('ml_search_nodes').value.toLowerCase();
+  document.querySelectorAll('#ml_nodes_list div').forEach(d => {
+    d.style.display = (!q || (d.dataset.nodename || '').includes(q)) ? '' : 'none';
+  });
+}
+
+window.addEventListener('load', buildUI);
 </script>
 
 </body>
