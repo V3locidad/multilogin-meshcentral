@@ -65,6 +65,7 @@ function getMeshCentralAPI() {
     try {
       if (ctx && ctx.meshserver && ctx.CreateAgentRedirect && ctx.CreateAgentRemoteDesktop) {
         return {
+          ctx: ctx,
           meshserver: ctx.meshserver,
           CreateAgentRedirect: ctx.CreateAgentRedirect,
           CreateAgentRemoteDesktop: ctx.CreateAgentRemoteDesktop,
@@ -79,6 +80,19 @@ function getMeshCentralAPI() {
   return null;
 }
 
+// Cree un canvas cache dans le document du parent (CreateAgentRemoteDesktop
+// utilise document.getElementById() depuis le contexte parent).
+function createHiddenCanvas(parentCtx) {
+  const id = 'ml_canvas_' + Math.random().toString(36).slice(2, 10);
+  const c = parentCtx.document.createElement('canvas');
+  c.id = id;
+  c.width = 800;
+  c.height = 600;
+  c.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;visibility:hidden';
+  parentCtx.document.body.appendChild(c);
+  return { id, element: c };
+}
+
 async function loginOnNode(nodeid, login, pass, log) {
   const api = getMeshCentralAPI();
   if (!api) {
@@ -87,11 +101,16 @@ async function loginOnNode(nodeid, login, pass, log) {
   }
 
   return new Promise((resolve) => {
+    // Canvas cache requis par CreateAgentRemoteDesktop
+    let canvas;
+    try { canvas = createHiddenCanvas(api.ctx); }
+    catch (e) { log(`[${nodeid}] canvas creation : ${e.message}`); return resolve(false); }
+
     let desktop;
     try {
       desktop = api.CreateAgentRedirect(
         api.meshserver,
-        api.CreateAgentRemoteDesktop('ml_' + Math.random().toString(36).slice(2, 8)),
+        api.CreateAgentRemoteDesktop(canvas.id),
         api.serverPublicNamePort,
         api.authCookie,
         api.authRelayCookie,
@@ -99,6 +118,7 @@ async function loginOnNode(nodeid, login, pass, log) {
       );
     } catch (e) {
       log(`[${nodeid}] CreateAgentRedirect exception : ${e.message}`);
+      try { canvas.element.remove(); } catch (e2) {}
       return resolve(false);
     }
 
@@ -111,6 +131,7 @@ async function loginOnNode(nodeid, login, pass, log) {
       finished = true;
       log(`[${nodeid}] ${msg}`);
       try { desktop.Stop(); } catch (e) {}
+      try { canvas.element.remove(); } catch (e) {}
       resolve(ok);
     };
 
