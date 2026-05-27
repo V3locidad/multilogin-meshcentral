@@ -197,35 +197,20 @@ async function loginOnNode(nodeid, login, pass, log) {
           return finish(false, 'm.State a chute pendant CAD');
         }
 
-        // S'assurer du focus sur le champ Nom d'utilisateur (Tab puis Shift+Tab = no-op
-        // qui force le focus). Ou simplement attendre + envoyer le login.
-        log(`[${nodeid}] tape login (${login.length} chars)`);
-        for (const ch of login) {
-          if (desktop.m.State !== 3) break;
-          const cp = ch.charCodeAt(0);
-          desktop.m.SendKeyUnicode(1, cp);
-          await sleep(20);
-          desktop.m.SendKeyUnicode(2, cp);
-          await sleep(80);
-        }
-        await sleep(300);
+        // Utilise SendStringUnicode comme le bouton "Ecrire" de MeshCentral
+        log(`[${nodeid}] tape login (${login.length} chars) via SendStringUnicode`);
+        desktop.m.SendStringUnicode(login);
+        await sleep(500);
 
         // Tab vers le champ mot de passe
         desktop.m.SendKeyMsgKC(1, SC_TAB);
         await sleep(30);
         desktop.m.SendKeyMsgKC(2, SC_TAB);
-        await sleep(400);
+        await sleep(500);
 
-        log(`[${nodeid}] tape mot de passe (${pass.length} chars)`);
-        for (const ch of pass) {
-          if (desktop.m.State !== 3) break;
-          const cp = ch.charCodeAt(0);
-          desktop.m.SendKeyUnicode(1, cp);
-          await sleep(20);
-          desktop.m.SendKeyUnicode(2, cp);
-          await sleep(80);
-        }
-        await sleep(300);
+        log(`[${nodeid}] tape mot de passe (${pass.length} chars) via SendStringUnicode`);
+        desktop.m.SendStringUnicode(pass);
+        await sleep(500);
 
         // Enter
         desktop.m.SendKeyMsgKC(1, SC_ENTER);
