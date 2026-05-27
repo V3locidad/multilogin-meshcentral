@@ -524,14 +524,12 @@ async function saveAccount() {
   const existing = _accountsCache.find(a => a.name === name);
   if (existing && !confirm('Un compte "' + name + '" existe deja sur le serveur. Remplacer ?')) return;
 
-  const body = new URLSearchParams({ name, user, pass });
+  const url = '/pluginadmin.ashx?pin=multilogin&action=save'
+    + '&name=' + encodeURIComponent(name)
+    + '&user=' + encodeURIComponent(user)
+    + '&pass=' + encodeURIComponent(pass);
   try {
-    const r = await fetch('/pluginadmin.ashx?pin=multilogin&action=save', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString()
-    });
+    const r = await fetch(url, { credentials: 'same-origin' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     await refreshAccountsDropdown(name);
     alert('Compte "' + name + '" enregistre sur le serveur.');
@@ -546,14 +544,9 @@ async function deleteAccount() {
   if (!name) { alert('Selectionne d\'abord un compte a supprimer'); return; }
   if (!confirm('Supprimer le compte "' + name + '" du serveur (pour tous les admins) ?')) return;
 
-  const body = new URLSearchParams({ name });
+  const url = '/pluginadmin.ashx?pin=multilogin&action=delete&name=' + encodeURIComponent(name);
   try {
-    const r = await fetch('/pluginadmin.ashx?pin=multilogin&action=delete', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString()
-    });
+    const r = await fetch(url, { credentials: 'same-origin' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     await refreshAccountsDropdown();
     document.getElementById('ml_user').value = '';
