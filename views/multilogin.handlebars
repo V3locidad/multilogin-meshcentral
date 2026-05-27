@@ -258,6 +258,11 @@ async function runMultiLogin() {
     logEl.textContent += line + '\n';
     logEl.scrollTop = logEl.scrollHeight;
     try { console.log('[multilogin]', line); } catch (e) {}
+    // Persistance dans localStorage pour survivre aux refresh de l'iframe
+    try {
+      const prev = localStorage.getItem('multilogin_log') || '';
+      localStorage.setItem('multilogin_log', prev + line + '\n');
+    } catch (e) {}
   };
 
   log(`Lancement sur ${nodes.length} poste(s), ${MAX_PARALLEL} en parallele`);
@@ -286,24 +291,41 @@ function selectWindowsOnly() {
 }
 
 function copyLog() {
-  const text = document.getElementById('ml_log').textContent;
+  // Recupere depuis localStorage (persistant) sinon depuis le pre
+  let text = '';
+  try { text = localStorage.getItem('multilogin_log') || ''; } catch (e) {}
+  if (!text) text = document.getElementById('ml_log').textContent;
+
   navigator.clipboard.writeText(text).then(() => {
-    alert('Log copie dans le presse-papier (' + text.length + ' caracteres)');
+    alert('Log copie (' + text.length + ' caracteres)');
   }).catch(err => {
-    // Fallback : selection manuelle
     const el = document.getElementById('ml_log');
+    el.textContent = text;
     const range = document.createRange();
     range.selectNodeContents(el);
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
-    alert('Selection faite, fais Cmd+C pour copier');
+    alert('Selection faite, Cmd+C pour copier');
   });
 }
 
 function clearLog() {
   document.getElementById('ml_log').textContent = '';
+  try { localStorage.removeItem('multilogin_log'); } catch (e) {}
 }
+
+// Au chargement de la page (y compris apres refresh de l'iframe), restaure le log
+window.addEventListener('load', () => {
+  try {
+    const saved = localStorage.getItem('multilogin_log');
+    if (saved) {
+      const el = document.getElementById('ml_log');
+      el.textContent = saved;
+      el.scrollTop = el.scrollHeight;
+    }
+  } catch (e) {}
+});
 
 // Cherche l'objet nodes en remontant les iframes parentes
 function findNodes() {
