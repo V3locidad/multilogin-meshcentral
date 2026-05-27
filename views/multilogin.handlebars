@@ -41,7 +41,6 @@
 
 <div class="toolbar">
   <button onclick="selectAll(true)">Tout cocher</button>
-  <button onclick="selectWindowsOnly()">Cocher Windows uniquement</button>
   <button onclick="selectAll(false)">Tout decocher</button>
   <span id="ml_count" style="margin-left:10px;color:#666"></span>
 </div>
@@ -477,20 +476,24 @@ function toggleLogs() {
   }
 }
 
-// ---- Gestion des comptes enregistres ----
-function getAccounts() {
-  try { return JSON.parse(localStorage.getItem('multilogin_accounts') || '[]'); }
-  catch (e) { return []; }
+// ---- Gestion des comptes (cote SERVEUR, partages entre admins) ----
+let _accountsCache = [];
+
+async function fetchAccounts() {
+  try {
+    const r = await fetch('/pluginadmin.ashx?pin=multilogin&action=list', { credentials: 'same-origin' });
+    if (!r.ok) return [];
+    _accountsCache = await r.json();
+    return _accountsCache;
+  } catch (e) {
+    console.warn('fetchAccounts erreur', e);
+    return [];
+  }
 }
 
-function setAccounts(list) {
-  try { localStorage.setItem('multilogin_accounts', JSON.stringify(list)); }
-  catch (e) { alert('Erreur sauvegarde : ' + e.message); }
-}
-
-function refreshAccountsDropdown(selectName) {
+async function refreshAccountsDropdown(selectName) {
   const sel = document.getElementById('ml_accounts');
-  const accounts = getAccounts().sort((a, b) => a.name.localeCompare(b.name));
+  const accounts = (await fetchAccounts()).sort((a, b) => a.name.localeCompare(b.name));
   sel.innerHTML = '<option value="">-- saisie manuelle --</option>';
   accounts.forEach(a => {
     const opt = document.createElement('option');
@@ -504,13 +507,13 @@ function refreshAccountsDropdown(selectName) {
 function loadAccount() {
   const name = document.getElementById('ml_accounts').value;
   if (!name) return;
-  const acc = getAccounts().find(a => a.name === name);
+  const acc = _accountsCache.find(a => a.name === name);
   if (!acc) return;
   document.getElementById('ml_user').value = acc.user;
   document.getElementById('ml_pass').value = acc.pass;
 }
 
-function saveAccount() {
+async function saveAccount() {
   const user = document.getElementById('ml_user').value;
   const pass = document.getElementById('ml_pass').value;
   if (!user || !pass) { alert('Saisis d\'abord login et mot de passe'); return; }
@@ -518,28 +521,46 @@ function saveAccount() {
   const name = prompt('Nom pour ce compte (par ex. "TEST", "maintenance prod") :', user);
   if (!name) return;
 
-  const accounts = getAccounts();
-  const existing = accounts.findIndex(a => a.name === name);
-  const entry = { name, user, pass };
-  if (existing >= 0) {
-    if (!confirm('Un compte "' + name + '" existe deja. Remplacer ?')) return;
-    accounts[existing] = entry;
-  } else {
-    accounts.push(entry);
+  const existing = _accountsCache.find(a => a.name === name);
+  if (existing && !confirm('Un compte "' + name + '" existe deja sur le serveur. Remplacer ?')) return;
+
+  const body = new URLSearchParams({ name, user, pass });
+  try {
+    const r = await fetch('/pluginadmin.ashx?pin=multilogin&action=save', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    await refreshAccountsDropdown(name);
+    alert('Compte "' + name + '" enregistre sur le serveur.');
+  } catch (e) {
+    alert('Erreur enregistrement : ' + e.message);
   }
-  setAccounts(accounts);
-  refreshAccountsDropdown(name);
 }
 
-function deleteAccount() {
+async function deleteAccount() {
   const sel = document.getElementById('ml_accounts');
   const name = sel.value;
   if (!name) { alert('Selectionne d\'abord un compte a supprimer'); return; }
-  if (!confirm('Supprimer le compte "' + name + '" ?')) return;
-  setAccounts(getAccounts().filter(a => a.name !== name));
-  refreshAccountsDropdown();
-  document.getElementById('ml_user').value = '';
-  document.getElementById('ml_pass').value = '';
+  if (!confirm('Supprimer le compte "' + name + '" du serveur (pour tous les admins) ?')) return;
+
+  const body = new URLSearchParams({ name });
+  try {
+    const r = await fetch('/pluginadmin.ashx?pin=multilogin&action=delete', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    await refreshAccountsDropdown();
+    document.getElementById('ml_user').value = '';
+    document.getElementById('ml_pass').value = '';
+  } catch (e) {
+    alert('Erreur suppression : ' + e.message);
+  }
 }
 
 // --- peuplement liste des postes ---
