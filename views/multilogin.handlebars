@@ -25,6 +25,16 @@
 <h2>Connexion multiple (KVM)</h2>
 
 <div class="row">
+  <label>Compte enregistre :
+    <select id="ml_accounts" onchange="loadAccount()">
+      <option value="">-- saisie manuelle --</option>
+    </select>
+  </label>
+  <button onclick="saveAccount()" style="padding:4px 10px;font-size:13px">Enregistrer</button>
+  <button onclick="deleteAccount()" style="padding:4px 10px;font-size:13px">Supprimer</button>
+</div>
+
+<div class="row">
   <label>Login : <input id="ml_user" type="text" autocomplete="off"></label>
   <label>Mot de passe : <input id="ml_pass" type="password" autocomplete="new-password"></label>
 </div>
@@ -51,11 +61,11 @@
 
 <div class="toolbar">
   <button onclick="runMultiLogin()">Lancer la connexion sur les postes coches</button>
-  <button onclick="copyLog()">Copier le log</button>
-  <button onclick="clearLog()">Effacer le log</button>
+  <span id="ml_status" style="margin-left:12px;color:#444;font-weight:bold"></span>
+  <button onclick="toggleLogs()" style="float:right;font-size:12px;padding:4px 8px">Logs</button>
 </div>
 
-<pre id="ml_log"></pre>
+<pre id="ml_log" style="display:none"></pre>
 
 <script>
 // ====================================================================
@@ -333,43 +343,43 @@ function injectWorkerOnce() {
           try { canvas.remove(); } catch (e) {}
           return false;
         }
-        ml.log('[' + nodeid + '] Start() lance, attente 5s');
-        await ml.sleep(5000);
+        ml.log('[' + nodeid + '] Start() lance, attente connexion');
+        await ml.sleep(2500);
         ml.log('[' + nodeid + '] State=' + desktop.m.State + ', envoi CAD');
         desktop.m.SendCtrlAltDelMsg();
-        await ml.sleep(4000);
+        await ml.sleep(2000);
 
         ml.log('[' + nodeid + '] tape login');
         for (var i = 0; i < login.length; i++) {
           var cp = login.charCodeAt(i);
           desktop.m.SendKeyUnicode(1, cp);
-          await ml.sleep(30);
+          await ml.sleep(15);
           desktop.m.SendKeyUnicode(2, cp);
-          await ml.sleep(100);
+          await ml.sleep(50);
         }
-        await ml.sleep(400);
+        await ml.sleep(200);
 
-        ml.log('[' + nodeid + '] Tab (VK=9)');
-        desktop.m.SendKeyMsgKC(1, 9);     // VK_TAB
-        await ml.sleep(40);
+        ml.log('[' + nodeid + '] Tab');
+        desktop.m.SendKeyMsgKC(1, 9);
+        await ml.sleep(30);
         desktop.m.SendKeyMsgKC(2, 9);
-        await ml.sleep(500);
+        await ml.sleep(300);
 
         ml.log('[' + nodeid + '] tape mdp');
         for (var i = 0; i < pass.length; i++) {
           var cp = pass.charCodeAt(i);
           desktop.m.SendKeyUnicode(1, cp);
-          await ml.sleep(30);
+          await ml.sleep(15);
           desktop.m.SendKeyUnicode(2, cp);
-          await ml.sleep(100);
+          await ml.sleep(50);
         }
-        await ml.sleep(400);
+        await ml.sleep(200);
 
-        ml.log('[' + nodeid + '] Enter (VK=13)');
-        desktop.m.SendKeyMsgKC(1, 13);    // VK_RETURN
-        await ml.sleep(40);
+        ml.log('[' + nodeid + '] Enter');
+        desktop.m.SendKeyMsgKC(1, 13);
+        await ml.sleep(30);
         desktop.m.SendKeyMsgKC(2, 13);
-        await ml.sleep(2500);
+        await ml.sleep(1000);
 
         try { desktop.Stop(); } catch (e) {}
         try { canvas.remove(); } catch (e) {}
@@ -380,9 +390,12 @@ function injectWorkerOnce() {
       ml.runJobs = async function(jobs, login, pass) {
         if (ml.running) { ml.log('Worker deja en cours, ignore'); return; }
         ml.running = true;
-        ml.log('Lancement sur ' + jobs.length + ' poste(s) (sequentiel, dans parent.window)');
+        ml.total = jobs.length;
+        ml.done = 0;
+        ml.log('Lancement sur ' + jobs.length + ' poste(s)');
         for (var i = 0; i < jobs.length; i++) {
           await ml.loginOnNode(jobs[i], login, pass);
+          ml.done = i + 1;
         }
         ml.log('--- termine ---');
         ml.running = false;
@@ -397,37 +410,136 @@ async function runMultiLogin() {
   const pass  = document.getElementById('ml_pass').value;
   if (!login || !pass) { alert('Login et mot de passe requis'); return; }
 
-  const nodes = [...document.querySelectorAll('.ml_node_cb:checked')]
-                  .map(i => i.value);
-  if (nodes.length === 0) { alert('Aucun poste coche'); return; }
+  // Selectionnes
+  const allSelected = [...document.querySelectorAll('.ml_node_cb:checked')];
+  if (allSelected.length === 0) { alert('Aucun poste coche'); return; }
 
-  // Injecte le worker dans parent (une seule fois)
-  injectWorkerOnce();
+  // Filtre : seulement les postes en ligne
+  const online = allSelected.filter(i => i.hasAttribute('data-online'));
+  const offline = allSelected.length - online.length;
+  const nodes = online.map(i => i.value);
 
-  // Attend que le worker soit pret
-  for (let i = 0; i < 20 && !parent.__multilogin; i++) {
-    await new Promise(r => setTimeout(r, 50));
-  }
-  if (!parent.__multilogin) {
-    alert('Worker non injecte');
+  if (nodes.length === 0) {
+    alert(`Tous les postes coches (${offline}) sont hors ligne. Aucune connexion possible.`);
     return;
   }
 
-  // Lance les jobs dans parent (survit aux refresh iframe)
+  if (offline > 0) {
+    const ok = confirm(`${offline} poste(s) hors ligne sera/seront ignore(s). Lancer sur les ${nodes.length} poste(s) en ligne ?`);
+    if (!ok) return;
+  }
+
+  // Injection du worker dans parent (une seule fois)
+  injectWorkerOnce();
+  for (let i = 0; i < 20 && !parent.__multilogin; i++) {
+    await new Promise(r => setTimeout(r, 50));
+  }
+  if (!parent.__multilogin) { alert('Worker non injecte'); return; }
+
+  // Reset progression
+  parent.__multilogin.done = 0;
+  parent.__multilogin.total = nodes.length;
+  try { localStorage.setItem('multilogin_log', ''); } catch (e) {}
+
+  // Lance
   parent.__multilogin.runJobs(nodes, login, pass);
 
-  // L'iframe affiche le log en pollant localStorage
+  // Polling progression + log
+  const statusEl = document.getElementById('ml_status');
   const logEl = document.getElementById('ml_log');
   const poll = setInterval(() => {
     try {
-      const text = localStorage.getItem('multilogin_log') || '';
-      logEl.textContent = text;
-      logEl.scrollTop = logEl.scrollHeight;
-      if (!parent.__multilogin.running) {
+      const ml = parent.__multilogin;
+      if (!ml) { clearInterval(poll); return; }
+      statusEl.textContent = ml.running
+        ? `En cours : ${ml.done}/${ml.total}`
+        : `Termine : ${ml.done}/${ml.total}`;
+      if (logEl.style.display !== 'none') {
+        logEl.textContent = localStorage.getItem('multilogin_log') || '';
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      if (!ml.running) {
         clearInterval(poll);
+        setTimeout(() => { if (!ml.running) statusEl.textContent += ' ✓'; }, 100);
       }
     } catch (e) { clearInterval(poll); }
   }, 500);
+}
+
+function toggleLogs() {
+  const el = document.getElementById('ml_log');
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    el.textContent = localStorage.getItem('multilogin_log') || '(vide)';
+    el.scrollTop = el.scrollHeight;
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+// ---- Gestion des comptes enregistres ----
+function getAccounts() {
+  try { return JSON.parse(localStorage.getItem('multilogin_accounts') || '[]'); }
+  catch (e) { return []; }
+}
+
+function setAccounts(list) {
+  try { localStorage.setItem('multilogin_accounts', JSON.stringify(list)); }
+  catch (e) { alert('Erreur sauvegarde : ' + e.message); }
+}
+
+function refreshAccountsDropdown(selectName) {
+  const sel = document.getElementById('ml_accounts');
+  const accounts = getAccounts().sort((a, b) => a.name.localeCompare(b.name));
+  sel.innerHTML = '<option value="">-- saisie manuelle --</option>';
+  accounts.forEach(a => {
+    const opt = document.createElement('option');
+    opt.value = a.name;
+    opt.textContent = a.name + ' (' + a.user + ')';
+    sel.appendChild(opt);
+  });
+  if (selectName) sel.value = selectName;
+}
+
+function loadAccount() {
+  const name = document.getElementById('ml_accounts').value;
+  if (!name) return;
+  const acc = getAccounts().find(a => a.name === name);
+  if (!acc) return;
+  document.getElementById('ml_user').value = acc.user;
+  document.getElementById('ml_pass').value = acc.pass;
+}
+
+function saveAccount() {
+  const user = document.getElementById('ml_user').value;
+  const pass = document.getElementById('ml_pass').value;
+  if (!user || !pass) { alert('Saisis d\'abord login et mot de passe'); return; }
+
+  const name = prompt('Nom pour ce compte (par ex. "TEST", "maintenance prod") :', user);
+  if (!name) return;
+
+  const accounts = getAccounts();
+  const existing = accounts.findIndex(a => a.name === name);
+  const entry = { name, user, pass };
+  if (existing >= 0) {
+    if (!confirm('Un compte "' + name + '" existe deja. Remplacer ?')) return;
+    accounts[existing] = entry;
+  } else {
+    accounts.push(entry);
+  }
+  setAccounts(accounts);
+  refreshAccountsDropdown(name);
+}
+
+function deleteAccount() {
+  const sel = document.getElementById('ml_accounts');
+  const name = sel.value;
+  if (!name) { alert('Selectionne d\'abord un compte a supprimer'); return; }
+  if (!confirm('Supprimer le compte "' + name + '" ?')) return;
+  setAccounts(getAccounts().filter(a => a.name !== name));
+  refreshAccountsDropdown();
+  document.getElementById('ml_user').value = '';
+  document.getElementById('ml_pass').value = '';
 }
 
 // --- peuplement liste des postes ---
@@ -452,30 +564,6 @@ function selectWindowsOnly() {
   });
 }
 
-function copyLog() {
-  // Recupere depuis localStorage (persistant) sinon depuis le pre
-  let text = '';
-  try { text = localStorage.getItem('multilogin_log') || ''; } catch (e) {}
-  if (!text) text = document.getElementById('ml_log').textContent;
-
-  navigator.clipboard.writeText(text).then(() => {
-    alert('Log copie (' + text.length + ' caracteres)');
-  }).catch(err => {
-    const el = document.getElementById('ml_log');
-    el.textContent = text;
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    alert('Selection faite, Cmd+C pour copier');
-  });
-}
-
-function clearLog() {
-  document.getElementById('ml_log').textContent = '';
-  try { localStorage.removeItem('multilogin_log'); } catch (e) {}
-}
 
 // Au chargement de la page (y compris apres refresh de l'iframe), restaure le log
 window.addEventListener('load', () => {
@@ -633,7 +721,10 @@ function filterNodes() {
   });
 }
 
-window.addEventListener('load', buildUI);
+window.addEventListener('load', () => {
+  buildUI();
+  refreshAccountsDropdown();
+});
 </script>
 
 </body>
