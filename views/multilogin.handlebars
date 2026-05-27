@@ -245,6 +245,138 @@ async function loginOnNode(nodeid, login, pass, log) {
   });
 }
 
+// Injecte le worker dans parent.window via un <script> tag.
+// Important : l'iframe peut etre refresh par MeshCentral pendant la sequence,
+// ce qui tuerait notre JS. En tournant dans parent, on survit a ces refresh.
+function injectWorkerOnce() {
+  if (parent.__multilogin_worker_ready) return;
+  parent.__multilogin_worker_ready = true;
+
+  const script = parent.document.createElement('script');
+  script.textContent = `
+    (function() {
+      var ml = window.__multilogin = window.__multilogin || {};
+      ml.sleep = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
+
+      ml.appendLog = function(line) {
+        try {
+          var prev = localStorage.getItem('multilogin_log') || '';
+          localStorage.setItem('multilogin_log', prev + line + '\\n');
+        } catch (e) {}
+        console.log('[multilogin]', line);
+      };
+      ml.log = function(m) { ml.appendLog('[' + new Date().toLocaleTimeString() + '] ' + m); };
+
+      ml.refreshAuthCookie = async function() {
+        var old = window.authCookie;
+        try { meshserver.send({action:'authcookie'}); } catch (e) { return null; }
+        for (var i = 0; i < 30; i++) {
+          await ml.sleep(100);
+          if (window.authCookie && window.authCookie !== old && window.authCookie.length > 10) return window.authCookie;
+        }
+        return window.authCookie || null;
+      };
+
+      ml.createHiddenCanvas = function() {
+        var id = 'ml_canvas_' + Math.random().toString(36).slice(2, 10);
+        var c = document.createElement('canvas');
+        c.id = id; c.width = 800; c.height = 600;
+        c.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;visibility:hidden';
+        document.body.appendChild(c);
+        return c;
+      };
+
+      ml.loginOnNode = async function(nodeid, login, pass) {
+        ml.log('[' + nodeid + '] demarrage');
+        var cookie = await ml.refreshAuthCookie();
+        if (!cookie) { ml.log('[' + nodeid + '] ERREUR cookie'); return false; }
+        ml.log('[' + nodeid + '] cookie frais (' + cookie.length + ')');
+
+        var canvas = ml.createHiddenCanvas();
+        var desktop;
+        try {
+          desktop = CreateAgentRedirect(meshserver, CreateAgentRemoteDesktop(canvas.id),
+            serverPublicNamePort, cookie, authRelayCookie, domainUrl || '');
+        } catch (e) {
+          ml.log('[' + nodeid + '] CreateAgentRedirect : ' + e.message);
+          try { canvas.remove(); } catch (e) {}
+          return false;
+        }
+
+        try {
+          desktop.m.UseExtendedKeyFlag = true;
+          desktop.attemptWebRTC = false;
+          desktop.options = {};
+          desktop.m.ImageType = 1;
+          desktop.m.CompressionLevel = 50;
+          desktop.m.ScalingLevel = 1024;
+          desktop.m.FrameRateTimer = 100;
+        } catch (e) {}
+
+        try { desktop.Start(nodeid); } catch (e) {
+          ml.log('[' + nodeid + '] Start : ' + e.message);
+          try { canvas.remove(); } catch (e) {}
+          return false;
+        }
+        ml.log('[' + nodeid + '] Start() lance, attente 5s');
+        await ml.sleep(5000);
+        ml.log('[' + nodeid + '] State=' + desktop.m.State + ', envoi CAD');
+        desktop.m.SendCtrlAltDelMsg();
+        await ml.sleep(4000);
+
+        ml.log('[' + nodeid + '] tape login');
+        for (var i = 0; i < login.length; i++) {
+          var cp = login.charCodeAt(i);
+          desktop.m.SendKeyUnicode(1, cp);
+          await ml.sleep(30);
+          desktop.m.SendKeyUnicode(2, cp);
+          await ml.sleep(100);
+        }
+        await ml.sleep(400);
+
+        ml.log('[' + nodeid + '] Tab');
+        desktop.m.SendKeyMsgKC(1, 0x0F);
+        await ml.sleep(40);
+        desktop.m.SendKeyMsgKC(2, 0x0F);
+        await ml.sleep(500);
+
+        ml.log('[' + nodeid + '] tape mdp');
+        for (var i = 0; i < pass.length; i++) {
+          var cp = pass.charCodeAt(i);
+          desktop.m.SendKeyUnicode(1, cp);
+          await ml.sleep(30);
+          desktop.m.SendKeyUnicode(2, cp);
+          await ml.sleep(100);
+        }
+        await ml.sleep(400);
+
+        ml.log('[' + nodeid + '] Enter');
+        desktop.m.SendKeyMsgKC(1, 0x1C);
+        await ml.sleep(40);
+        desktop.m.SendKeyMsgKC(2, 0x1C);
+        await ml.sleep(2500);
+
+        try { desktop.Stop(); } catch (e) {}
+        try { canvas.remove(); } catch (e) {}
+        ml.log('[' + nodeid + '] termine');
+        return true;
+      };
+
+      ml.runJobs = async function(jobs, login, pass) {
+        if (ml.running) { ml.log('Worker deja en cours, ignore'); return; }
+        ml.running = true;
+        ml.log('Lancement sur ' + jobs.length + ' poste(s) (sequentiel, dans parent.window)');
+        for (var i = 0; i < jobs.length; i++) {
+          await ml.loginOnNode(jobs[i], login, pass);
+        }
+        ml.log('--- termine ---');
+        ml.running = false;
+      };
+    })();
+  `;
+  parent.document.body.appendChild(script);
+}
+
 async function runMultiLogin() {
   const login = document.getElementById('ml_user').value;
   const pass  = document.getElementById('ml_pass').value;
@@ -254,30 +386,33 @@ async function runMultiLogin() {
                   .map(i => i.value);
   if (nodes.length === 0) { alert('Aucun poste coche'); return; }
 
-  const logEl = document.getElementById('ml_log');
-  const log = (m) => {
-    const line = `[${new Date().toLocaleTimeString()}] ${m}`;
-    logEl.textContent += line + '\n';
-    logEl.scrollTop = logEl.scrollHeight;
-    try { console.log('[multilogin]', line); } catch (e) {}
-    // Persistance dans localStorage pour survivre aux refresh de l'iframe
-    try {
-      const prev = localStorage.getItem('multilogin_log') || '';
-      localStorage.setItem('multilogin_log', prev + line + '\n');
-    } catch (e) {}
-  };
+  // Injecte le worker dans parent (une seule fois)
+  injectWorkerOnce();
 
-  log(`Lancement sur ${nodes.length} poste(s), ${MAX_PARALLEL} en parallele`);
-
-  let i = 0;
-  async function worker() {
-    while (i < nodes.length) {
-      const id = nodes[i++];
-      await loginOnNode(id, login, pass, log);
-    }
+  // Attend que le worker soit pret
+  for (let i = 0; i < 20 && !parent.__multilogin; i++) {
+    await new Promise(r => setTimeout(r, 50));
   }
-  await Promise.all(Array(Math.min(MAX_PARALLEL, nodes.length)).fill(0).map(worker));
-  log('--- termine ---');
+  if (!parent.__multilogin) {
+    alert('Worker non injecte');
+    return;
+  }
+
+  // Lance les jobs dans parent (survit aux refresh iframe)
+  parent.__multilogin.runJobs(nodes, login, pass);
+
+  // L'iframe affiche le log en pollant localStorage
+  const logEl = document.getElementById('ml_log');
+  const poll = setInterval(() => {
+    try {
+      const text = localStorage.getItem('multilogin_log') || '';
+      logEl.textContent = text;
+      logEl.scrollTop = logEl.scrollHeight;
+      if (!parent.__multilogin.running) {
+        clearInterval(poll);
+      }
+    } catch (e) { clearInterval(poll); }
+  }, 500);
 }
 
 // --- peuplement liste des postes ---
