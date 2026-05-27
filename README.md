@@ -24,8 +24,6 @@ Built for IT admins managing classroom/lab fleets where the same maintenance acc
 
 ## Installation
 
-### Option 1 — Via the MeshCentral Plugin Manager (recommended)
-
 1. Open MeshCentral as an administrator
 2. Go to **My Server → Plugins** (called *Modules* in some localized UIs)
 3. Click **Download Plugin** (or *Télécharger le module*)
@@ -37,16 +35,6 @@ Built for IT admins managing classroom/lab fleets where the same maintenance acc
 6. Toggle the plugin **enabled**
 7. **Restart the MeshCentral server** (`systemctl restart meshcentral` or your equivalent)
 8. Reload the MeshCentral UI in your browser — a new **Multi-Login** tab appears on each device's page
-
-### Option 2 — Manual install
-
-1. Clone this repository into your MeshCentral plugins directory:
-   ```bash
-   cd <meshcentral-data>/plugins
-   git clone https://github.com/V3locidad/multilogin-meshcentral.git multilogin
-   ```
-2. Enable the plugin in MeshCentral's plugins admin panel
-3. Restart MeshCentral
 
 ## Usage
 
@@ -81,12 +69,6 @@ Keystrokes are sent via the agent's KVM input channel:
 
 The MeshAgent on Windows runs as `SYSTEM` and uses `SendInput` to inject keys, so input reaches the Windows secure desktop (Winlogon) the same way as a physical keyboard.
 
-## Security notes
-
-- **Saved account passwords are stored in plain text** in `accounts.json` inside the plugin directory on the MeshCentral server. The file is readable only by the MeshCentral process user. Treat this file like any other secrets file.
-- Account writes/deletes currently use GET requests with credentials in URL parameters (MeshCentral's `/pluginadmin.ashx` endpoint rejects POSTs). The transit is HTTPS so on-the-wire interception is not a concern, but **MeshCentral access logs may contain the URLs** with credentials. If this matters for your threat model, see the *Roadmap* below — moving to WebSocket-based RPC is on the list.
-- Anyone with admin access to MeshCentral can read, write, and delete all saved accounts.
-
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -100,24 +82,6 @@ The MeshAgent on Windows runs as `SYSTEM` and uses `SendInput` to inject keys, s
 | `Aucune donnee agent recue` | The target machine's agent is unreachable | Check agent status in MeshCentral, retry later |
 
 To see the raw step-by-step log, click the **Logs** button on the Multi-Login pane.
-
-## Roadmap / Possible improvements
-
-- [ ] Switch credential storage RPC from HTTP GET to MeshCentral WebSocket messages (no credentials in URLs/logs)
-- [ ] Encrypt `accounts.json` at rest using a key derived from MeshCentral's master secret
-- [ ] Parallel execution with controllable concurrency (currently sequential)
-- [ ] Per-machine credentials (CSV import: `nodeid,user,pass`)
-- [ ] Selection presets — save and recall sets of computers
-- [ ] Domain-aware username (auto-prepend `DOMAIN\` or `user@domain`)
-- [ ] Audit log on the server side — who used which account on which nodes, when
-- [ ] Per-account ACL (limit certain accounts to specific admin users or device groups)
-- [ ] Re-attempt on failure with backoff
-- [ ] Configurable keystroke timings via the UI
-- [ ] Custom post-login actions (run a script, open an application…)
-- [ ] Dark mode matching MeshCentral's theme
-- [ ] Replace `prompt`/`alert`/`confirm` with proper modals
-- [ ] i18n (currently mixed FR/EN in the UI)
-- [ ] Status icon per machine after a run (success / failed / skipped)
 
 ## License
 
