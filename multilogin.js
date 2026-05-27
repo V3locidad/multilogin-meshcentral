@@ -1,8 +1,8 @@
 /**
- * MeshCentral plugin : multilogin
- * Permet de selectionner plusieurs postes Windows et de declencher un login
- * automatique en masse via le canal KVM (CAD + saisie credentials).
- * Stocke les comptes credentials cote serveur pour partage entre admins.
+ * MeshCentral plugin: multilogin
+ * Lets an admin select multiple Windows computers and trigger an automated
+ * login on each via the KVM channel (Ctrl+Alt+Del + typed credentials).
+ * Saved accounts are stored on the server so all admins share the same list.
  */
 var fs = require('fs');
 var path = require('path');
@@ -26,6 +26,9 @@ module.exports.multilogin = function (parent) {
 
     obj.server_startup = function () {};
 
+    // Injects a "Multi-Login" tab into the device view.
+    // The iframe is created only once: re-creating it on every device refresh
+    // would tear down the running KVM session in the middle of a sequence.
     obj.onDeviceRefreshEnd = function () {
         pluginHandler.registerPluginTab({
             tabTitle: "Multi-Login",
@@ -42,14 +45,14 @@ module.exports.multilogin = function (parent) {
     obj.handleAdminReq = function (req, res, user) {
         var action = req.query && req.query.action;
 
-        // Liste des comptes (GET)
+        // List saved accounts (GET)
         if (action === 'list') {
             res.set('Content-Type', 'application/json');
             res.send(JSON.stringify(loadAccounts()));
             return;
         }
 
-        // Enregistre ou met a jour (POST avec body OU GET avec query)
+        // Save or update an account (accepts POST body or GET query params)
         if (action === 'save') {
             var b = (req.body && typeof req.body === 'object') ? req.body : req.query;
             var name = b.name, u = b.user, p = b.pass;
@@ -66,7 +69,7 @@ module.exports.multilogin = function (parent) {
             return;
         }
 
-        // Supprime un compte
+        // Delete an account by name
         if (action === 'delete') {
             var bd = (req.body && typeof req.body === 'object') ? req.body : req.query;
             var dname = bd.name;
@@ -80,7 +83,7 @@ module.exports.multilogin = function (parent) {
             return;
         }
 
-        // Par defaut : sert la vue
+        // Default: serve the plugin view
         res.render(path.join(__dirname, 'views/multilogin'), { user: user });
     };
 

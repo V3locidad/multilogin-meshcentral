@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Multi-Login KVM</title>
@@ -22,45 +22,45 @@
 </head>
 <body>
 
-<h2>Connexion multiple (KVM)</h2>
+<h2>Multi-Login (KVM)</h2>
 
 <div class="row">
-  <label>Compte enregistre :
+  <label>Saved account:
     <select id="ml_accounts" onchange="loadAccount()">
-      <option value="">-- saisie manuelle --</option>
+      <option value="">-- manual entry --</option>
     </select>
   </label>
-  <button onclick="saveAccount()" style="padding:4px 10px;font-size:13px">Enregistrer</button>
-  <button onclick="deleteAccount()" style="padding:4px 10px;font-size:13px">Supprimer</button>
+  <button onclick="saveAccount()" style="padding:4px 10px;font-size:13px">Save</button>
+  <button onclick="deleteAccount()" style="padding:4px 10px;font-size:13px">Delete</button>
 </div>
 
 <div class="row">
-  <label>Login : <input id="ml_user" type="text" autocomplete="off"></label>
-  <label>Mot de passe : <input id="ml_pass" type="password" autocomplete="new-password"></label>
+  <label>Username: <input id="ml_user" type="text" autocomplete="off"></label>
+  <label>Password: <input id="ml_pass" type="password" autocomplete="new-password"></label>
 </div>
 
 <div class="toolbar">
-  <button onclick="selectAll(true)">Tout cocher</button>
-  <button onclick="selectAll(false)">Tout decocher</button>
+  <button onclick="selectAll(true)">Select all</button>
+  <button onclick="selectAll(false)">Deselect all</button>
   <span id="ml_count" style="margin-left:10px;color:#666"></span>
 </div>
 
 <div class="panes">
   <div id="ml_groups">
-    <div class="pane-title">Groupes</div>
-    <input type="text" id="ml_search_groups" class="search" placeholder="Filtrer les groupes..." oninput="filterGroups()">
-    <div id="ml_groups_list">Chargement...</div>
+    <div class="pane-title">Groups</div>
+    <input type="text" id="ml_search_groups" class="search" placeholder="Filter groups..." oninput="filterGroups()">
+    <div id="ml_groups_list">Loading...</div>
   </div>
   <div id="ml_nodes">
-    <div class="pane-title">Postes</div>
-    <input type="text" id="ml_search_nodes" class="search" placeholder="Filtrer les postes..." oninput="filterNodes()">
-    <div id="ml_nodes_list">Chargement...</div>
+    <div class="pane-title">Computers</div>
+    <input type="text" id="ml_search_nodes" class="search" placeholder="Filter computers..." oninput="filterNodes()">
+    <div id="ml_nodes_list">Loading...</div>
   </div>
 </div>
 
 <div class="toolbar">
-  <button onclick="runMultiLogin()">Lancer la connexion sur les postes coches</button>
-  <label style="margin-left:12px;font-size:13px">Parallelisme :
+  <button onclick="runMultiLogin()">Launch login on selected computers</button>
+  <label style="margin-left:12px;font-size:13px">Concurrency:
     <input type="number" id="ml_concurrency" min="1" max="10" value="3" style="width:45px;padding:3px">
   </label>
   <span id="ml_status" style="margin-left:12px;color:#444;font-weight:bold"></span>
@@ -71,210 +71,16 @@
 
 <script>
 // ====================================================================
-// Multi-Login KVM - utilise les fonctions internes MeshCentral :
-//   CreateAgentRedirect + CreateAgentRemoteDesktop
-// Elles gerent automatiquement : tunnel, auth, handshake, protocole KVM
+// Multi-Login KVM
+// Uses MeshCentral's own functions (CreateAgentRedirect +
+// CreateAgentRemoteDesktop) to open a KVM tunnel to each selected node,
+// then injects keyboard events (Ctrl+Alt+Del, username, Tab, password,
+// Enter) as if typed on the local keyboard.
+//
+// The heavy work runs inside a script injected into parent.window so
+// it survives MeshCentral's periodic iframe refreshes.
 // ====================================================================
 
-const MAX_PARALLEL = 1;  // sequentiel : cookie a usage unique, eviter les races
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// Demande un authCookie FRAIS au serveur et attend qu'il soit propage
-async function refreshAuthCookie(ctx, log) {
-  const oldCookie = ctx.authCookie;
-  try { ctx.meshserver.send({ action: 'authcookie' }); } catch (e) {
-    if (log) log('refreshAuthCookie : ms.send erreur ' + e.message);
-    return null;
-  }
-  // Attendre jusqu'a 3s que ctx.authCookie change
-  for (let i = 0; i < 30; i++) {
-    await sleep(100);
-    if (ctx.authCookie && ctx.authCookie !== oldCookie && ctx.authCookie.length > 10) {
-      return ctx.authCookie;
-    }
-  }
-  // Si pas de changement, retourne ce qu'on a quand meme
-  return ctx.authCookie || null;
-}
-
-// Scancodes XT
-const SC_TAB = 0x0F;
-const SC_ENTER = 0x1C;
-
-// Recupere les symboles MeshCentral depuis parent/top
-function getMeshCentralAPI() {
-  const ctxs = [];
-  try { ctxs.push(parent); } catch (e) {}
-  try { ctxs.push(parent.parent); } catch (e) {}
-  try { ctxs.push(top); } catch (e) {}
-
-  for (const ctx of ctxs) {
-    try {
-      if (ctx && ctx.meshserver && ctx.CreateAgentRedirect && ctx.CreateAgentRemoteDesktop) {
-        return {
-          ctx: ctx,
-          meshserver: ctx.meshserver,
-          CreateAgentRedirect: ctx.CreateAgentRedirect,
-          CreateAgentRemoteDesktop: ctx.CreateAgentRemoteDesktop,
-          authCookie: ctx.authCookie,
-          authRelayCookie: ctx.authRelayCookie,
-          serverPublicNamePort: ctx.serverPublicNamePort,
-          domainUrl: ctx.domainUrl || ''
-        };
-      }
-    } catch (e) {}
-  }
-  return null;
-}
-
-// Cree un canvas cache dans le document du parent (CreateAgentRemoteDesktop
-// utilise document.getElementById() depuis le contexte parent).
-function createHiddenCanvas(parentCtx) {
-  const id = 'ml_canvas_' + Math.random().toString(36).slice(2, 10);
-  const c = parentCtx.document.createElement('canvas');
-  c.id = id;
-  c.width = 800;
-  c.height = 600;
-  c.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;visibility:hidden';
-  parentCtx.document.body.appendChild(c);
-  return { id, element: c };
-}
-
-async function loginOnNode(nodeid, login, pass, log) {
-  const api = getMeshCentralAPI();
-  if (!api) {
-    log(`[${nodeid}] ERREUR : API MeshCentral introuvable`);
-    return false;
-  }
-
-  // Demande un authCookie frais (les anciens sont a usage unique)
-  const freshCookie = await refreshAuthCookie(api.ctx, log);
-  if (!freshCookie) {
-    log(`[${nodeid}] ERREUR : impossible de rafraichir authCookie`);
-    return false;
-  }
-  log(`[${nodeid}] cookie frais (${freshCookie.length} chars)`);
-
-  return new Promise((resolve) => {
-    // Canvas cache requis par CreateAgentRemoteDesktop
-    let canvas;
-    try { canvas = createHiddenCanvas(api.ctx); }
-    catch (e) { log(`[${nodeid}] canvas creation : ${e.message}`); return resolve(false); }
-
-    let desktop;
-    try {
-      desktop = api.CreateAgentRedirect(
-        api.meshserver,
-        api.CreateAgentRemoteDesktop(canvas.id),
-        api.serverPublicNamePort,
-        freshCookie,
-        api.ctx.authRelayCookie,
-        api.domainUrl
-      );
-    } catch (e) {
-      log(`[${nodeid}] CreateAgentRedirect exception : ${e.message}`);
-      try { canvas.element.remove(); } catch (e2) {}
-      return resolve(false);
-    }
-
-    // Setup complet comme MeshCentral le fait dans connectDesktop()
-    try {
-      desktop.m.UseExtendedKeyFlag = true;
-      desktop.attemptWebRTC = false;
-      desktop.options = {};
-      desktop.m.ImageType = 1;
-      desktop.m.CompressionLevel = 50;
-      desktop.m.ScalingLevel = 1024;
-      desktop.m.FrameRateTimer = 100;
-      desktop.m.debugmode = 1;                 // les SendKey* loggent dans la console DevTools
-    } catch (e) {
-      log(`[${nodeid}] setup desktop.m : ${e.message}`);
-    }
-
-    let finished = false;
-    const finish = (ok, msg) => {
-      if (finished) return;
-      finished = true;
-      log(`[${nodeid}] ${msg}`);
-      try { desktop.Stop(); } catch (e) {}
-      try { canvas.element.remove(); } catch (e) {}
-      resolve(ok);
-    };
-
-    const timer = setTimeout(() => finish(false, 'timeout 35s'), 35000);
-
-    // Lance la connexion immediatement (on poll desktop.m.State plutot que onStateChanged
-    // pour etre sur que le module KVM lui-meme est pret avant d'envoyer les touches)
-    try {
-      desktop.Start(nodeid);
-      log(`[${nodeid}] Start() lance`);
-    } catch (e) {
-      clearTimeout(timer);
-      return finish(false, 'Start() exception : ' + e.message);
-    }
-
-    (async () => {
-      try {
-        // Delai fixe : laisser la connexion s'etablir pleinement
-        log(`[${nodeid}] delai 5s pour stabiliser la connexion KVM...`);
-        await sleep(5000);
-
-        if (desktop.m.State !== 3) {
-          clearTimeout(timer);
-          return finish(false, `State pas 3 apres 5s (=${desktop.m.State})`);
-        }
-        log(`[${nodeid}] State=${desktop.m.State}, tilesRecus=${desktop.m.tilesReceived || 0}`);
-
-        log(`[${nodeid}] envoi Ctrl+Alt+Del`);
-        desktop.m.SendCtrlAltDelMsg();
-        await sleep(4000);
-
-        // Envoi char par char avec delais (plus tolerant que SendStringUnicode)
-        log(`[${nodeid}] tape login : "${login}" (${login.length} chars)`);
-        for (let i = 0; i < login.length; i++) {
-          const cp = login.charCodeAt(i);
-          desktop.m.SendKeyUnicode(1, cp);  // down
-          await sleep(30);
-          desktop.m.SendKeyUnicode(2, cp);  // up
-          await sleep(100);
-        }
-        await sleep(400);
-
-        log(`[${nodeid}] Tab`);
-        desktop.m.SendKeyMsgKC(1, SC_TAB);
-        await sleep(40);
-        desktop.m.SendKeyMsgKC(2, SC_TAB);
-        await sleep(500);
-
-        log(`[${nodeid}] tape mot de passe (${pass.length} chars)`);
-        for (let i = 0; i < pass.length; i++) {
-          const cp = pass.charCodeAt(i);
-          desktop.m.SendKeyUnicode(1, cp);
-          await sleep(30);
-          desktop.m.SendKeyUnicode(2, cp);
-          await sleep(100);
-        }
-        await sleep(400);
-
-        log(`[${nodeid}] Enter`);
-        desktop.m.SendKeyMsgKC(1, SC_ENTER);
-        await sleep(40);
-        desktop.m.SendKeyMsgKC(2, SC_ENTER);
-        await sleep(2500);
-
-        clearTimeout(timer);
-        finish(true, 'sequence envoyee');
-      } catch (e) {
-        clearTimeout(timer);
-        finish(false, 'erreur envoi : ' + e.message);
-      }
-    })();
-  });
-}
-
-// Injecte le worker dans parent.window via un <script> tag.
-// Important : l'iframe peut etre refresh par MeshCentral pendant la sequence,
-// ce qui tuerait notre JS. En tournant dans parent, on survit a ces refresh.
 function injectWorkerOnce() {
   if (parent.__multilogin_worker_ready) return;
   parent.__multilogin_worker_ready = true;
@@ -304,7 +110,7 @@ function injectWorkerOnce() {
         return window.authCookie || null;
       };
 
-      // Mutex pour serialiser l'acquisition du cookie (window.authCookie est partage)
+      // Mutex to serialize auth cookie acquisition (window.authCookie is global)
       ml.cookieMutex = Promise.resolve();
       ml.getFreshCookieSafe = function() {
         var result = ml.cookieMutex.then(function() { return ml.refreshAuthCookie(); });
@@ -312,7 +118,7 @@ function injectWorkerOnce() {
         return result;
       };
 
-      // Statut par poste : 'pending' / 'running' / 'success' / 'failed'
+      // Per-node status : 'pending' / 'running' / 'success' / 'failed'
       ml.status = {};
       ml.persistStatus = function() {
         try { localStorage.setItem('multilogin_status', JSON.stringify(ml.status)); } catch (e) {}
@@ -333,10 +139,10 @@ function injectWorkerOnce() {
 
       ml.loginOnNode = async function(nodeid, login, pass) {
         ml.setStatus(nodeid, 'running');
-        ml.log('[' + nodeid + '] demarrage');
+        ml.log('[' + nodeid + '] starting');
         var cookie = await ml.getFreshCookieSafe();
-        if (!cookie) { ml.log('[' + nodeid + '] ERREUR cookie'); ml.setStatus(nodeid, 'failed'); return false; }
-        ml.log('[' + nodeid + '] cookie frais (' + cookie.length + ')');
+        if (!cookie) { ml.log('[' + nodeid + '] ERROR cookie'); ml.setStatus(nodeid, 'failed'); return false; }
+        ml.log('[' + nodeid + '] fresh cookie (' + cookie.length + ' chars)');
 
         var canvas = ml.createHiddenCanvas();
         var desktop;
@@ -344,7 +150,7 @@ function injectWorkerOnce() {
           desktop = CreateAgentRedirect(meshserver, CreateAgentRemoteDesktop(canvas.id),
             serverPublicNamePort, cookie, authRelayCookie, domainUrl || '');
         } catch (e) {
-          ml.log('[' + nodeid + '] CreateAgentRedirect : ' + e.message);
+          ml.log('[' + nodeid + '] CreateAgentRedirect: ' + e.message);
           try { canvas.remove(); } catch (e) {}
           ml.setStatus(nodeid, 'failed');
           return false;
@@ -361,18 +167,18 @@ function injectWorkerOnce() {
         } catch (e) {}
 
         try { desktop.Start(nodeid); } catch (e) {
-          ml.log('[' + nodeid + '] Start : ' + e.message);
+          ml.log('[' + nodeid + '] Start: ' + e.message);
           try { canvas.remove(); } catch (e) {}
           ml.setStatus(nodeid, 'failed');
           return false;
         }
-        ml.log('[' + nodeid + '] Start() lance, attente connexion');
+        ml.log('[' + nodeid + '] Start() called, waiting for KVM connection');
         await ml.sleep(2500);
-        ml.log('[' + nodeid + '] State=' + desktop.m.State + ', envoi CAD');
+        ml.log('[' + nodeid + '] State=' + desktop.m.State + ', sending CAD');
         desktop.m.SendCtrlAltDelMsg();
         await ml.sleep(2000);
 
-        ml.log('[' + nodeid + '] tape login');
+        ml.log('[' + nodeid + '] typing username');
         for (var i = 0; i < login.length; i++) {
           var cp = login.charCodeAt(i);
           desktop.m.SendKeyUnicode(1, cp);
@@ -388,7 +194,7 @@ function injectWorkerOnce() {
         desktop.m.SendKeyMsgKC(2, 9);
         await ml.sleep(300);
 
-        ml.log('[' + nodeid + '] tape mdp');
+        ml.log('[' + nodeid + '] typing password');
         for (var i = 0; i < pass.length; i++) {
           var cp = pass.charCodeAt(i);
           desktop.m.SendKeyUnicode(1, cp);
@@ -406,13 +212,13 @@ function injectWorkerOnce() {
 
         try { desktop.Stop(); } catch (e) {}
         try { canvas.remove(); } catch (e) {}
-        ml.log('[' + nodeid + '] termine');
+        ml.log('[' + nodeid + '] done');
         ml.setStatus(nodeid, 'success');
         return true;
       };
 
       ml.runJobs = async function(jobs, login, pass, concurrency) {
-        if (ml.running) { ml.log('Worker deja en cours, ignore'); return; }
+        if (ml.running) { ml.log('Worker already running, ignored'); return; }
         ml.running = true;
         ml.total = jobs.length;
         ml.done = 0;
@@ -421,7 +227,7 @@ function injectWorkerOnce() {
         ml.persistStatus();
 
         var c = Math.max(1, Math.min(10, concurrency || 1));
-        ml.log('Lancement sur ' + jobs.length + ' poste(s) avec concurrence ' + c);
+        ml.log('Launching on ' + jobs.length + ' computer(s) with concurrency ' + c);
 
         var idx = 0;
         async function worker() {
@@ -435,7 +241,7 @@ function injectWorkerOnce() {
         for (var i = 0; i < Math.min(c, jobs.length); i++) workers.push(worker());
         await Promise.all(workers);
 
-        ml.log('--- termine ---');
+        ml.log('--- done ---');
         ml.running = false;
       };
     })();
@@ -446,40 +252,39 @@ function injectWorkerOnce() {
 async function runMultiLogin() {
   const login = document.getElementById('ml_user').value;
   const pass  = document.getElementById('ml_pass').value;
-  if (!login || !pass) { alert('Login et mot de passe requis'); return; }
+  if (!login || !pass) { alert('Username and password are required'); return; }
 
-  // Selectionnes
   const allSelected = [...document.querySelectorAll('.ml_node_cb:checked')];
-  if (allSelected.length === 0) { alert('Aucun poste coche'); return; }
+  if (allSelected.length === 0) { alert('No computer selected'); return; }
 
-  // Filtre : seulement les postes en ligne
+  // Filter to online computers only
   const online = allSelected.filter(i => i.hasAttribute('data-online'));
   const offline = allSelected.length - online.length;
   const nodes = online.map(i => i.value);
 
   if (nodes.length === 0) {
-    alert(`Tous les postes coches (${offline}) sont hors ligne. Aucune connexion possible.`);
+    alert(`All selected computers (${offline}) are offline. Nothing to do.`);
     return;
   }
 
   if (offline > 0) {
-    const ok = confirm(`${offline} poste(s) hors ligne sera/seront ignore(s). Lancer sur les ${nodes.length} poste(s) en ligne ?`);
+    const ok = confirm(`${offline} offline computer(s) will be skipped. Launch on ${nodes.length} online computer(s)?`);
     if (!ok) return;
   }
 
-  // Injection du worker dans parent (une seule fois)
+  // Inject the worker into parent once
   injectWorkerOnce();
   for (let i = 0; i < 20 && !parent.__multilogin; i++) {
     await new Promise(r => setTimeout(r, 50));
   }
-  if (!parent.__multilogin) { alert('Worker non injecte'); return; }
+  if (!parent.__multilogin) { alert('Worker could not be injected'); return; }
 
-  // Lit le parallelisme
+  // Read concurrency setting
   let concurrency = parseInt(document.getElementById('ml_concurrency').value, 10);
   if (!concurrency || concurrency < 1) concurrency = 1;
   if (concurrency > 10) concurrency = 10;
 
-  // Reset progression et statuts
+  // Reset progress and statuses
   parent.__multilogin.done = 0;
   parent.__multilogin.total = nodes.length;
   parent.__multilogin.status = {};
@@ -488,10 +293,9 @@ async function runMultiLogin() {
     localStorage.setItem('multilogin_status', '{}');
   } catch (e) {}
 
-  // Lance
   parent.__multilogin.runJobs(nodes, login, pass, concurrency);
 
-  // Polling progression + statut par poste + log
+  // Poll progress, per-node status and logs
   const statusEl = document.getElementById('ml_status');
   const logEl = document.getElementById('ml_log');
   const poll = setInterval(() => {
@@ -499,8 +303,8 @@ async function runMultiLogin() {
       const ml = parent.__multilogin;
       if (!ml) { clearInterval(poll); return; }
       statusEl.textContent = ml.running
-        ? `En cours : ${ml.done}/${ml.total} (parallel x${concurrency})`
-        : `Termine : ${ml.done}/${ml.total}`;
+        ? `Running: ${ml.done}/${ml.total} (parallel x${concurrency})`
+        : `Done: ${ml.done}/${ml.total}`;
 
       updateNodeStatusDisplay();
 
@@ -510,7 +314,7 @@ async function runMultiLogin() {
       }
       if (!ml.running) {
         clearInterval(poll);
-        setTimeout(updateNodeStatusDisplay, 200);  // dernier refresh
+        setTimeout(updateNodeStatusDisplay, 200);
       }
     } catch (e) { clearInterval(poll); }
   }, 400);
@@ -520,10 +324,10 @@ function updateNodeStatusDisplay() {
   let statusMap = {};
   try { statusMap = JSON.parse(localStorage.getItem('multilogin_status') || '{}'); } catch (e) {}
   const STYLES = {
-    pending: { txt: '⋯ en attente', color: '#888' },
-    running: { txt: '▶ en cours', color: '#06f' },
-    success: { txt: '✓ ok', color: '#080' },
-    failed:  { txt: '✗ echec', color: '#c00' }
+    pending: { txt: '⋯ pending', color: '#888' },
+    running: { txt: '▶ running', color: '#06f' },
+    success: { txt: '✓ ok',      color: '#080' },
+    failed:  { txt: '✗ failed',  color: '#c00' }
   };
   document.querySelectorAll('.ml_node_status').forEach(span => {
     const id = span.dataset.nodeid;
@@ -538,21 +342,18 @@ function updateNodeStatusDisplay() {
   });
 }
 
-// Au chargement, restaure l'affichage des statuts s'il y en avait
-window.addEventListener('load', () => setTimeout(updateNodeStatusDisplay, 100));
-
 function toggleLogs() {
   const el = document.getElementById('ml_log');
   if (el.style.display === 'none') {
     el.style.display = 'block';
-    el.textContent = localStorage.getItem('multilogin_log') || '(vide)';
+    el.textContent = localStorage.getItem('multilogin_log') || '(empty)';
     el.scrollTop = el.scrollHeight;
   } else {
     el.style.display = 'none';
   }
 }
 
-// ---- Gestion des comptes (cote SERVEUR, partages entre admins) ----
+// ---- Accounts (stored server-side, shared between admins) ----
 let _accountsCache = [];
 
 async function fetchAccounts() {
@@ -562,7 +363,7 @@ async function fetchAccounts() {
     _accountsCache = await r.json();
     return _accountsCache;
   } catch (e) {
-    console.warn('fetchAccounts erreur', e);
+    console.warn('fetchAccounts error', e);
     return [];
   }
 }
@@ -570,7 +371,7 @@ async function fetchAccounts() {
 async function refreshAccountsDropdown(selectName) {
   const sel = document.getElementById('ml_accounts');
   const accounts = (await fetchAccounts()).sort((a, b) => a.name.localeCompare(b.name));
-  sel.innerHTML = '<option value="">-- saisie manuelle --</option>';
+  sel.innerHTML = '<option value="">-- manual entry --</option>';
   accounts.forEach(a => {
     const opt = document.createElement('option');
     opt.value = a.name;
@@ -592,13 +393,13 @@ function loadAccount() {
 async function saveAccount() {
   const user = document.getElementById('ml_user').value;
   const pass = document.getElementById('ml_pass').value;
-  if (!user || !pass) { alert('Saisis d\'abord login et mot de passe'); return; }
+  if (!user || !pass) { alert('Enter a username and password first'); return; }
 
-  const name = prompt('Nom pour ce compte (par ex. "TEST", "maintenance prod") :', user);
+  const name = prompt('Name for this account (e.g. "TEST", "maintenance prod"):', user);
   if (!name) return;
 
   const existing = _accountsCache.find(a => a.name === name);
-  if (existing && !confirm('Un compte "' + name + '" existe deja sur le serveur. Remplacer ?')) return;
+  if (existing && !confirm('An account named "' + name + '" already exists. Replace it?')) return;
 
   const url = '/pluginadmin.ashx?pin=multilogin&action=save'
     + '&name=' + encodeURIComponent(name)
@@ -608,17 +409,17 @@ async function saveAccount() {
     const r = await fetch(url, { credentials: 'same-origin' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     await refreshAccountsDropdown(name);
-    alert('Compte "' + name + '" enregistre sur le serveur.');
+    alert('Account "' + name + '" saved on the server.');
   } catch (e) {
-    alert('Erreur enregistrement : ' + e.message);
+    alert('Save error: ' + e.message);
   }
 }
 
 async function deleteAccount() {
   const sel = document.getElementById('ml_accounts');
   const name = sel.value;
-  if (!name) { alert('Selectionne d\'abord un compte a supprimer'); return; }
-  if (!confirm('Supprimer le compte "' + name + '" du serveur (pour tous les admins) ?')) return;
+  if (!name) { alert('Select an account to delete first'); return; }
+  if (!confirm('Delete account "' + name + '" from the server (for all admins)?')) return;
 
   const url = '/pluginadmin.ashx?pin=multilogin&action=delete&name=' + encodeURIComponent(name);
   try {
@@ -628,46 +429,16 @@ async function deleteAccount() {
     document.getElementById('ml_user').value = '';
     document.getElementById('ml_pass').value = '';
   } catch (e) {
-    alert('Erreur suppression : ' + e.message);
+    alert('Delete error: ' + e.message);
   }
 }
-
-// --- peuplement liste des postes ---
 
 function selectAll(state) {
   document.querySelectorAll('.ml_node_cb').forEach(i => i.checked = state);
   document.querySelectorAll('.ml_group_cb').forEach(i => { i.checked = state; i.indeterminate = false; });
 }
 
-function selectWindowsOnly() {
-  document.querySelectorAll('.ml_node_cb').forEach(i => {
-    i.checked = i.hasAttribute('data-win');
-  });
-  // Resynchroniser l'etat des groupes
-  document.querySelectorAll('.ml_group_cb').forEach(gcb => {
-    const mid = gcb.dataset.meshid;
-    const all = document.querySelectorAll(`.ml_node_cb[data-meshid="${CSS.escape(mid)}"]`);
-    const allChecked = Array.from(all).every(cb => cb.checked);
-    const someChecked = Array.from(all).some(cb => cb.checked);
-    gcb.checked = allChecked;
-    gcb.indeterminate = !allChecked && someChecked;
-  });
-}
-
-
-// Au chargement de la page (y compris apres refresh de l'iframe), restaure le log
-window.addEventListener('load', () => {
-  try {
-    const saved = localStorage.getItem('multilogin_log');
-    if (saved) {
-      const el = document.getElementById('ml_log');
-      el.textContent = saved;
-      el.scrollTop = el.scrollHeight;
-    }
-  } catch (e) {}
-});
-
-// Cherche l'objet nodes en remontant les iframes parentes
+// Look up the MeshCentral nodes object across iframe parents
 function findNodes() {
   const candidates = [];
   try { candidates.push(['parent.nodes', parent.nodes]); } catch (e) {}
@@ -685,7 +456,7 @@ function findNodes() {
   return { obj: null, source: null, tried: candidates.map(c => c[0]) };
 }
 
-// Detection OS : agent.id 1-4 et 13 = Windows
+// OS detection: agent.id 1-4 and 13 are Windows variants
 const WINDOWS_AGENT_IDS = new Set([1, 2, 3, 4, 13]);
 
 function osLabel(agentId) {
@@ -712,13 +483,13 @@ function buildUI() {
 
   const result = findNodes();
   if (!result.obj) {
-    nodesList.innerHTML = '<div style="color:red">nodes introuvable. Essayes :<br>' + result.tried.join('<br>') + '</div>';
+    nodesList.innerHTML = '<div style="color:red">nodes object not found. Tried:<br>' + result.tried.join('<br>') + '</div>';
     return;
   }
   const nodesObj = result.obj;
   const meshesObj = findMeshes() || {};
 
-  // Regroupe les nodes par meshid
+  // Group nodes by meshid
   const nodesByMesh = {};
   let countWin = 0, countOther = 0;
   Object.values(nodesObj).forEach(n => {
@@ -730,16 +501,16 @@ function buildUI() {
     if (isWin) countWin++; else countOther++;
   });
 
-  // Tri par nom de groupe
+  // Sort groups by name
   const meshIds = Object.keys(nodesByMesh).sort((a, b) => {
     const na = (meshesObj[a] && meshesObj[a].name) || a;
     const nb = (meshesObj[b] && meshesObj[b].name) || b;
     return na.localeCompare(nb);
   });
 
-  // ----- Panneau Groupes -----
+  // Groups pane
   meshIds.forEach(mid => {
-    const mesh = meshesObj[mid] || { name: '(sans groupe)' };
+    const mesh = meshesObj[mid] || { name: '(no group)' };
     const nodes = nodesByMesh[mid];
     const div = document.createElement('div');
     div.dataset.meshname = (mesh.name || mid).toLowerCase();
@@ -747,7 +518,7 @@ function buildUI() {
     groupsList.appendChild(div);
   });
 
-  // Tri postes par nom dans chaque groupe et affichage flat
+  // Sort nodes by name within each group, then flatten for display
   const allNodesSorted = [].concat(...meshIds.map(mid => nodesByMesh[mid].slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''))));
 
   allNodesSorted.forEach(n => {
@@ -770,9 +541,9 @@ function buildUI() {
   });
 
   document.getElementById('ml_count').textContent =
-    `${countWin} Windows + ${countOther} autres dans ${meshIds.length} groupe(s)`;
+    `${countWin} Windows + ${countOther} other across ${meshIds.length} group(s)`;
 
-  // Listener pour synchroniser groupes -> nodes
+  // Group checkbox -> toggle all its nodes
   document.querySelectorAll('.ml_group_cb').forEach(gcb => {
     gcb.addEventListener('change', () => {
       const mid = gcb.dataset.meshid;
@@ -782,7 +553,7 @@ function buildUI() {
     });
   });
 
-  // Listener inverse : si tous les nodes d'un groupe sont coches, cocher le groupe
+  // Node checkbox -> update parent group checkbox state (all/some/none)
   document.querySelectorAll('.ml_node_cb').forEach(ncb => {
     ncb.addEventListener('change', () => {
       const mid = ncb.dataset.meshid;
