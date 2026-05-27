@@ -150,8 +150,24 @@ async function loginOnNode(nodeid, login, pass, log) {
       return resolve(false);
     }
 
-    // Sur Windows on active les extended keys
-    try { desktop.m.UseExtendedKeyFlag = true; } catch (e) {}
+    // Setup complet comme MeshCentral le fait dans connectDesktop()
+    try {
+      desktop.m.UseExtendedKeyFlag = true;
+      desktop.attemptWebRTC = false;           // pas de WebRTC -> reste sur le tunnel WS
+      desktop.options = {};
+      desktop.m.ImageType = 1;                 // 1 = JPEG (compatible partout)
+      desktop.m.CompressionLevel = 50;
+      desktop.m.ScalingLevel = 1024;
+      desktop.m.FrameRateTimer = 100;
+    } catch (e) {
+      log(`[${nodeid}] setup desktop.m : ${e.message}`);
+    }
+
+    // Signal de readiness reel : onScreenSizeChange fire quand l'agent envoie ses infos
+    let screenReady = false;
+    try {
+      desktop.m.onScreenSizeChange = () => { screenReady = true; };
+    } catch (e) {}
 
     let finished = false;
     const finish = (ok, msg) => {
@@ -177,27 +193,24 @@ async function loginOnNode(nodeid, login, pass, log) {
 
     (async () => {
       try {
-        // Attendre que le MODULE KVM (desktop.m) soit a State 3
-        log(`[${nodeid}] attente desktop.m.State === 3...`);
+        // Attendre que l'AGENT envoie ses premieres donnees (onScreenSizeChange)
+        // C'est un signal beaucoup plus fiable que State === 3 qui peut etre instantane
+        log(`[${nodeid}] attente reception donnees agent (onScreenSizeChange)...`);
         const waitStart = Date.now();
-        while ((desktop.m.State !== 3) && (Date.now() - waitStart < 20000) && !finished) {
+        while (!screenReady && (Date.now() - waitStart < 20000) && !finished) {
           await sleep(200);
         }
         if (finished) return;
-        if (desktop.m.State !== 3) {
+        if (!screenReady) {
           clearTimeout(timer);
-          return finish(false, `desktop.m.State jamais 3 (=${desktop.m.State})`);
+          return finish(false, `aucune donnee agent recue apres 20s (State=${desktop.m.State}, redirState=${desktop.State})`);
         }
-        log(`[${nodeid}] KVM pret (m.State=3), envoi CAD`);
+        log(`[${nodeid}] agent pret (data recue apres ${Date.now()-waitStart}ms, State=${desktop.m.State})`);
+        await sleep(800);  // marge pour stabiliser
 
-        await sleep(500);
+        log(`[${nodeid}] envoi Ctrl+Alt+Del`);
         desktop.m.SendCtrlAltDelMsg();
-        await sleep(3500);  // laisser Windows basculer sur l'ecran credentials
-
-        if (desktop.m.State !== 3) {
-          clearTimeout(timer);
-          return finish(false, 'm.State a chute pendant CAD');
-        }
+        await sleep(4000);  // laisser Windows basculer sur l'ecran credentials
 
         // Utilise SendStringUnicode comme le bouton "Ecrire" de MeshCentral
         log(`[${nodeid}] tape login (${login.length} chars) via SendStringUnicode`);
