@@ -1,7 +1,7 @@
 {
   "name": "multilogin",
   "shortName": "multilogin",
-  "version": "0.0.23",
+  "version": "0.0.25",
   "author": "V3locidad",
   "description": "Login automatique en masse sur postes Windows verrouilles via le KVM MeshCentral",
   "hasAdminPanel": true,

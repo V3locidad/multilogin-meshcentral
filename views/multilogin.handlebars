@@ -60,6 +60,9 @@
 
 <div class="toolbar">
   <button onclick="runMultiLogin()">Lancer la connexion sur les postes coches</button>
+  <label style="margin-left:12px;font-size:13px">Parallelisme :
+    <input type="number" id="ml_concurrency" min="1" max="10" value="3" style="width:45px;padding:3px">
+  </label>
   <span id="ml_status" style="margin-left:12px;color:#444;font-weight:bold"></span>
   <button onclick="toggleLogs()" style="float:right;font-size:12px;padding:4px 8px">Logs</button>
 </div>
@@ -301,6 +304,24 @@ function injectWorkerOnce() {
         return window.authCookie || null;
       };
 
+      // Mutex pour serialiser l'acquisition du cookie (window.authCookie est partage)
+      ml.cookieMutex = Promise.resolve();
+      ml.getFreshCookieSafe = function() {
+        var result = ml.cookieMutex.then(function() { return ml.refreshAuthCookie(); });
+        ml.cookieMutex = result.then(function(){return null;}, function(){return null;});
+        return result;
+      };
+
+      // Statut par poste : 'pending' / 'running' / 'success' / 'failed'
+      ml.status = {};
+      ml.persistStatus = function() {
+        try { localStorage.setItem('multilogin_status', JSON.stringify(ml.status)); } catch (e) {}
+      };
+      ml.setStatus = function(nodeid, state) {
+        ml.status[nodeid] = state;
+        ml.persistStatus();
+      };
+
       ml.createHiddenCanvas = function() {
         var id = 'ml_canvas_' + Math.random().toString(36).slice(2, 10);
         var c = document.createElement('canvas');
@@ -311,9 +332,10 @@ function injectWorkerOnce() {
       };
 
       ml.loginOnNode = async function(nodeid, login, pass) {
+        ml.setStatus(nodeid, 'running');
         ml.log('[' + nodeid + '] demarrage');
-        var cookie = await ml.refreshAuthCookie();
-        if (!cookie) { ml.log('[' + nodeid + '] ERREUR cookie'); return false; }
+        var cookie = await ml.getFreshCookieSafe();
+        if (!cookie) { ml.log('[' + nodeid + '] ERREUR cookie'); ml.setStatus(nodeid, 'failed'); return false; }
         ml.log('[' + nodeid + '] cookie frais (' + cookie.length + ')');
 
         var canvas = ml.createHiddenCanvas();
@@ -324,6 +346,7 @@ function injectWorkerOnce() {
         } catch (e) {
           ml.log('[' + nodeid + '] CreateAgentRedirect : ' + e.message);
           try { canvas.remove(); } catch (e) {}
+          ml.setStatus(nodeid, 'failed');
           return false;
         }
 
@@ -340,6 +363,7 @@ function injectWorkerOnce() {
         try { desktop.Start(nodeid); } catch (e) {
           ml.log('[' + nodeid + '] Start : ' + e.message);
           try { canvas.remove(); } catch (e) {}
+          ml.setStatus(nodeid, 'failed');
           return false;
         }
         ml.log('[' + nodeid + '] Start() lance, attente connexion');
@@ -383,19 +407,34 @@ function injectWorkerOnce() {
         try { desktop.Stop(); } catch (e) {}
         try { canvas.remove(); } catch (e) {}
         ml.log('[' + nodeid + '] termine');
+        ml.setStatus(nodeid, 'success');
         return true;
       };
 
-      ml.runJobs = async function(jobs, login, pass) {
+      ml.runJobs = async function(jobs, login, pass, concurrency) {
         if (ml.running) { ml.log('Worker deja en cours, ignore'); return; }
         ml.running = true;
         ml.total = jobs.length;
         ml.done = 0;
-        ml.log('Lancement sur ' + jobs.length + ' poste(s)');
-        for (var i = 0; i < jobs.length; i++) {
-          await ml.loginOnNode(jobs[i], login, pass);
-          ml.done = i + 1;
+        ml.status = {};
+        jobs.forEach(function(j){ ml.status[j] = 'pending'; });
+        ml.persistStatus();
+
+        var c = Math.max(1, Math.min(10, concurrency || 1));
+        ml.log('Lancement sur ' + jobs.length + ' poste(s) avec concurrence ' + c);
+
+        var idx = 0;
+        async function worker() {
+          while (idx < jobs.length) {
+            var id = jobs[idx++];
+            await ml.loginOnNode(id, login, pass);
+            ml.done++;
+          }
         }
+        var workers = [];
+        for (var i = 0; i < Math.min(c, jobs.length); i++) workers.push(worker());
+        await Promise.all(workers);
+
         ml.log('--- termine ---');
         ml.running = false;
       };
@@ -435,15 +474,24 @@ async function runMultiLogin() {
   }
   if (!parent.__multilogin) { alert('Worker non injecte'); return; }
 
-  // Reset progression
+  // Lit le parallelisme
+  let concurrency = parseInt(document.getElementById('ml_concurrency').value, 10);
+  if (!concurrency || concurrency < 1) concurrency = 1;
+  if (concurrency > 10) concurrency = 10;
+
+  // Reset progression et statuts
   parent.__multilogin.done = 0;
   parent.__multilogin.total = nodes.length;
-  try { localStorage.setItem('multilogin_log', ''); } catch (e) {}
+  parent.__multilogin.status = {};
+  try {
+    localStorage.setItem('multilogin_log', '');
+    localStorage.setItem('multilogin_status', '{}');
+  } catch (e) {}
 
   // Lance
-  parent.__multilogin.runJobs(nodes, login, pass);
+  parent.__multilogin.runJobs(nodes, login, pass, concurrency);
 
-  // Polling progression + log
+  // Polling progression + statut par poste + log
   const statusEl = document.getElementById('ml_status');
   const logEl = document.getElementById('ml_log');
   const poll = setInterval(() => {
@@ -451,19 +499,47 @@ async function runMultiLogin() {
       const ml = parent.__multilogin;
       if (!ml) { clearInterval(poll); return; }
       statusEl.textContent = ml.running
-        ? `En cours : ${ml.done}/${ml.total}`
+        ? `En cours : ${ml.done}/${ml.total} (parallel x${concurrency})`
         : `Termine : ${ml.done}/${ml.total}`;
+
+      updateNodeStatusDisplay();
+
       if (logEl.style.display !== 'none') {
         logEl.textContent = localStorage.getItem('multilogin_log') || '';
         logEl.scrollTop = logEl.scrollHeight;
       }
       if (!ml.running) {
         clearInterval(poll);
-        setTimeout(() => { if (!ml.running) statusEl.textContent += ' ✓'; }, 100);
+        setTimeout(updateNodeStatusDisplay, 200);  // dernier refresh
       }
     } catch (e) { clearInterval(poll); }
-  }, 500);
+  }, 400);
 }
+
+function updateNodeStatusDisplay() {
+  let statusMap = {};
+  try { statusMap = JSON.parse(localStorage.getItem('multilogin_status') || '{}'); } catch (e) {}
+  const STYLES = {
+    pending: { txt: '⋯ en attente', color: '#888' },
+    running: { txt: '▶ en cours', color: '#06f' },
+    success: { txt: '✓ ok', color: '#080' },
+    failed:  { txt: '✗ echec', color: '#c00' }
+  };
+  document.querySelectorAll('.ml_node_status').forEach(span => {
+    const id = span.dataset.nodeid;
+    const state = statusMap[id];
+    if (state && STYLES[state]) {
+      span.textContent = STYLES[state].txt;
+      span.style.color = STYLES[state].color;
+      span.style.fontWeight = (state === 'running' || state === 'failed') ? 'bold' : 'normal';
+    } else {
+      span.textContent = '';
+    }
+  });
+}
+
+// Au chargement, restaure l'affichage des statuts s'il y en avait
+window.addEventListener('load', () => setTimeout(updateNodeStatusDisplay, 100));
 
 function toggleLogs() {
   const el = document.getElementById('ml_log');
@@ -689,7 +765,7 @@ function buildUI() {
       ? '<span style="color:#080;font-size:11px;margin-left:4px">●</span>'
       : '<span style="color:#c00;font-size:11px;margin-left:4px">○</span>';
     const meshTag = `<span style="color:#888;font-size:10px;margin-left:8px">${escapeHTML(meshName)}</span>`;
-    div.innerHTML = `<label><input type="checkbox" class="ml_node_cb" value="${escapeHTML(n._id)}" data-meshid="${escapeHTML(n.meshid || '')}" ${isWin ? 'data-win="1"' : ''} ${online ? 'data-online="1"' : ''}> ${onTag} ${escapeHTML(n.name || n._id)} ${osTag} ${meshTag}</label>`;
+    div.innerHTML = `<label><input type="checkbox" class="ml_node_cb" value="${escapeHTML(n._id)}" data-meshid="${escapeHTML(n.meshid || '')}" ${isWin ? 'data-win="1"' : ''} ${online ? 'data-online="1"' : ''}> ${onTag} ${escapeHTML(n.name || n._id)} ${osTag} ${meshTag} <span class="ml_node_status" data-nodeid="${escapeHTML(n._id)}" style="margin-left:6px;font-size:11px"></span></label>`;
     nodesList.appendChild(div);
   });
 
