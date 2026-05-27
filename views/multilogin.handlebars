@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
 <meta charset="utf-8">
 <title>Multi-Login KVM</title>
@@ -47,8 +47,26 @@
 // Elles gerent automatiquement : tunnel, auth, handshake, protocole KVM
 // ====================================================================
 
-const MAX_PARALLEL = 6;
+const MAX_PARALLEL = 1;  // sequentiel : cookie a usage unique, eviter les races
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Demande un authCookie FRAIS au serveur et attend qu'il soit propage
+async function refreshAuthCookie(ctx, log) {
+  const oldCookie = ctx.authCookie;
+  try { ctx.meshserver.send({ action: 'authcookie' }); } catch (e) {
+    if (log) log('refreshAuthCookie : ms.send erreur ' + e.message);
+    return null;
+  }
+  // Attendre jusqu'a 3s que ctx.authCookie change
+  for (let i = 0; i < 30; i++) {
+    await sleep(100);
+    if (ctx.authCookie && ctx.authCookie !== oldCookie && ctx.authCookie.length > 10) {
+      return ctx.authCookie;
+    }
+  }
+  // Si pas de changement, retourne ce qu'on a quand meme
+  return ctx.authCookie || null;
+}
 
 // Scancodes XT
 const SC_TAB = 0x0F;
@@ -96,9 +114,17 @@ function createHiddenCanvas(parentCtx) {
 async function loginOnNode(nodeid, login, pass, log) {
   const api = getMeshCentralAPI();
   if (!api) {
-    log(`[${nodeid}] ERREUR : API MeshCentral introuvable (parent.CreateAgentRedirect manquant)`);
+    log(`[${nodeid}] ERREUR : API MeshCentral introuvable`);
     return false;
   }
+
+  // Demande un authCookie frais (les anciens sont a usage unique)
+  const freshCookie = await refreshAuthCookie(api.ctx, log);
+  if (!freshCookie) {
+    log(`[${nodeid}] ERREUR : impossible de rafraichir authCookie`);
+    return false;
+  }
+  log(`[${nodeid}] cookie frais (${freshCookie.length} chars)`);
 
   return new Promise((resolve) => {
     // Canvas cache requis par CreateAgentRemoteDesktop
@@ -112,8 +138,8 @@ async function loginOnNode(nodeid, login, pass, log) {
         api.meshserver,
         api.CreateAgentRemoteDesktop(canvas.id),
         api.serverPublicNamePort,
-        api.authCookie,
-        api.authRelayCookie,
+        freshCookie,
+        api.ctx.authRelayCookie,
         api.domainUrl
       );
     } catch (e) {
@@ -278,6 +304,11 @@ window.addEventListener('load', () => {
   const nodesObj = result.obj;
   let countWin = 0, countOther = 0;
 
+  // Etat de connexion (online) : nodes peut contenir node.conn (bitmap) ou
+  // on utilise parent.powerStatus / parent.nodes[id].state
+  let powerState = {};
+  try { powerState = result.obj === parent.nodes ? (parent.powerStatus || {}) : {}; } catch (e) {}
+
   Object.values(nodesObj).forEach(n => {
     if (!n || !n._id) return;
     const agentId = n.agent ? n.agent.id : undefined;
@@ -285,10 +316,16 @@ window.addEventListener('load', () => {
     const isWin = WINDOWS_AGENT_IDS.has(agentId);
     if (isWin) countWin++; else countOther++;
 
+    // online si conn & 1 (agent connected)
+    const online = (n.conn !== undefined) ? ((n.conn & 1) === 1) : false;
+
     const div = document.createElement('div');
     const safeName = (n.name || n._id).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-    const tag = `<span style="color:${isWin ? '#080' : '#888'};font-size:11px;margin-left:6px">[${os}]</span>`;
-    div.innerHTML = `<label><input type="checkbox" value="${n._id}" ${isWin ? 'data-win="1"' : ''}> ${safeName} ${tag}</label>`;
+    const osTag = `<span style="color:${isWin ? '#080' : '#888'};font-size:11px;margin-left:6px">[${os}]</span>`;
+    const onTag = online
+      ? '<span style="color:#080;font-size:11px;margin-left:4px">●</span>'
+      : '<span style="color:#c00;font-size:11px;margin-left:4px">○</span>';
+    div.innerHTML = `<label><input type="checkbox" value="${n._id}" ${isWin ? 'data-win="1"' : ''} ${online ? 'data-online="1"' : ''}> ${onTag} ${safeName} ${osTag}</label>`;
     container.appendChild(div);
   });
 
