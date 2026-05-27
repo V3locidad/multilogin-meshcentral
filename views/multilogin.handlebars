@@ -334,10 +334,10 @@ function injectWorkerOnce() {
         }
         await ml.sleep(400);
 
-        ml.log('[' + nodeid + '] Tab');
-        desktop.m.SendKeyMsgKC(1, 0x0F);
+        ml.log('[' + nodeid + '] Tab (VK=9)');
+        desktop.m.SendKeyMsgKC(1, 9);     // VK_TAB
         await ml.sleep(40);
-        desktop.m.SendKeyMsgKC(2, 0x0F);
+        desktop.m.SendKeyMsgKC(2, 9);
         await ml.sleep(500);
 
         ml.log('[' + nodeid + '] tape mdp');
@@ -350,10 +350,10 @@ function injectWorkerOnce() {
         }
         await ml.sleep(400);
 
-        ml.log('[' + nodeid + '] Enter');
-        desktop.m.SendKeyMsgKC(1, 0x1C);
+        ml.log('[' + nodeid + '] Enter (VK=13)');
+        desktop.m.SendKeyMsgKC(1, 13);    // VK_RETURN
         await ml.sleep(40);
-        desktop.m.SendKeyMsgKC(2, 0x1C);
+        desktop.m.SendKeyMsgKC(2, 13);
         await ml.sleep(2500);
 
         try { desktop.Stop(); } catch (e) {}
