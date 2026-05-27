@@ -161,64 +161,85 @@ async function loginOnNode(nodeid, login, pass, log) {
       resolve(ok);
     };
 
-    const timer = setTimeout(() => finish(false, 'timeout 25s'), 25000);
+    const timer = setTimeout(() => finish(false, 'timeout 35s'), 35000);
 
-    desktop.onStateChanged = async (sender, state) => {
-      // States MeshCentral : 0=disconnected, 1=connecting, 2=auth, 3=connected
-      if (state === 3) {
-        log(`[${nodeid}] connecte, envoi credentials`);
-        try {
-          await sleep(800);
-          desktop.m.SendCtrlAltDelMsg();
-          await sleep(2500);
-
-          // Login : caracteres en Unicode
-          for (const ch of login) {
-            const cp = ch.charCodeAt(0);
-            desktop.m.SendKeyUnicode(1, cp);
-            desktop.m.SendKeyUnicode(2, cp);
-            await sleep(40);
-          }
-          await sleep(150);
-
-          // Tab (scancode)
-          desktop.m.SendKeyMsgKC(1, SC_TAB);
-          desktop.m.SendKeyMsgKC(2, SC_TAB);
-          await sleep(200);
-
-          // Password
-          for (const ch of pass) {
-            const cp = ch.charCodeAt(0);
-            desktop.m.SendKeyUnicode(1, cp);
-            desktop.m.SendKeyUnicode(2, cp);
-            await sleep(40);
-          }
-          await sleep(200);
-
-          // Enter
-          desktop.m.SendKeyMsgKC(1, SC_ENTER);
-          desktop.m.SendKeyMsgKC(2, SC_ENTER);
-          await sleep(1500);
-
-          clearTimeout(timer);
-          finish(true, 'sequence envoyee');
-        } catch (e) {
-          clearTimeout(timer);
-          finish(false, 'erreur envoi : ' + e.message);
-        }
-      } else if (state === 0 && !finished) {
-        clearTimeout(timer);
-        finish(false, 'deconnecte (state=0) avant connexion');
-      }
-    };
-
+    // Lance la connexion immediatement (on poll desktop.m.State plutot que onStateChanged
+    // pour etre sur que le module KVM lui-meme est pret avant d'envoyer les touches)
     try {
       desktop.Start(nodeid);
       log(`[${nodeid}] Start() lance`);
     } catch (e) {
       clearTimeout(timer);
-      finish(false, 'Start() exception : ' + e.message);
+      return finish(false, 'Start() exception : ' + e.message);
     }
+
+    (async () => {
+      try {
+        // Attendre que le MODULE KVM (desktop.m) soit a State 3
+        log(`[${nodeid}] attente desktop.m.State === 3...`);
+        const waitStart = Date.now();
+        while ((desktop.m.State !== 3) && (Date.now() - waitStart < 20000) && !finished) {
+          await sleep(200);
+        }
+        if (finished) return;
+        if (desktop.m.State !== 3) {
+          clearTimeout(timer);
+          return finish(false, `desktop.m.State jamais 3 (=${desktop.m.State})`);
+        }
+        log(`[${nodeid}] KVM pret (m.State=3), envoi CAD`);
+
+        await sleep(500);
+        desktop.m.SendCtrlAltDelMsg();
+        await sleep(3500);  // laisser Windows basculer sur l'ecran credentials
+
+        if (desktop.m.State !== 3) {
+          clearTimeout(timer);
+          return finish(false, 'm.State a chute pendant CAD');
+        }
+
+        // S'assurer du focus sur le champ Nom d'utilisateur (Tab puis Shift+Tab = no-op
+        // qui force le focus). Ou simplement attendre + envoyer le login.
+        log(`[${nodeid}] tape login (${login.length} chars)`);
+        for (const ch of login) {
+          if (desktop.m.State !== 3) break;
+          const cp = ch.charCodeAt(0);
+          desktop.m.SendKeyUnicode(1, cp);
+          await sleep(20);
+          desktop.m.SendKeyUnicode(2, cp);
+          await sleep(80);
+        }
+        await sleep(300);
+
+        // Tab vers le champ mot de passe
+        desktop.m.SendKeyMsgKC(1, SC_TAB);
+        await sleep(30);
+        desktop.m.SendKeyMsgKC(2, SC_TAB);
+        await sleep(400);
+
+        log(`[${nodeid}] tape mot de passe (${pass.length} chars)`);
+        for (const ch of pass) {
+          if (desktop.m.State !== 3) break;
+          const cp = ch.charCodeAt(0);
+          desktop.m.SendKeyUnicode(1, cp);
+          await sleep(20);
+          desktop.m.SendKeyUnicode(2, cp);
+          await sleep(80);
+        }
+        await sleep(300);
+
+        // Enter
+        desktop.m.SendKeyMsgKC(1, SC_ENTER);
+        await sleep(30);
+        desktop.m.SendKeyMsgKC(2, SC_ENTER);
+        await sleep(2000);
+
+        clearTimeout(timer);
+        finish(true, 'sequence envoyee');
+      } catch (e) {
+        clearTimeout(timer);
+        finish(false, 'erreur envoi : ' + e.message);
+      }
+    })();
   });
 }
 
