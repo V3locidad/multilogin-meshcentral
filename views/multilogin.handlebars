@@ -153,18 +153,16 @@ async function loginOnNode(nodeid, login, pass, log) {
     // Setup complet comme MeshCentral le fait dans connectDesktop()
     try {
       desktop.m.UseExtendedKeyFlag = true;
-      desktop.attemptWebRTC = false;           // pas de WebRTC -> reste sur le tunnel WS
+      desktop.attemptWebRTC = false;
       desktop.options = {};
-      desktop.m.ImageType = 1;                 // 1 = JPEG (compatible partout)
+      desktop.m.ImageType = 1;
       desktop.m.CompressionLevel = 50;
       desktop.m.ScalingLevel = 1024;
       desktop.m.FrameRateTimer = 100;
+      desktop.m.debugmode = 1;                 // les SendKey* loggent dans la console DevTools
     } catch (e) {
       log(`[${nodeid}] setup desktop.m : ${e.message}`);
     }
-
-    // On polle desktop.m.ScreenWidth > 0 plutot que de hooker onScreenSizeChange
-    // (le callback peut etre ecrase par le redirecteur)
 
     let finished = false;
     const finish = (ok, msg) => {
@@ -190,51 +188,52 @@ async function loginOnNode(nodeid, login, pass, log) {
 
     (async () => {
       try {
-        // Attendre que l'agent ait envoye la taille d'ecran (= il est dans la boucle KVM active)
-        log(`[${nodeid}] attente ScreenWidth > 0...`);
-        const waitStart = Date.now();
-        while ((!desktop.m.ScreenWidth || desktop.m.ScreenWidth === 0)
-               && (Date.now() - waitStart < 20000) && !finished) {
-          await sleep(200);
-        }
-        if (finished) return;
-        if (!desktop.m.ScreenWidth) {
+        // Delai fixe : laisser la connexion s'etablir pleinement
+        log(`[${nodeid}] delai 5s pour stabiliser la connexion KVM...`);
+        await sleep(5000);
+
+        if (desktop.m.State !== 3) {
           clearTimeout(timer);
-          return finish(false, `pas de ScreenWidth apres 20s (State=${desktop.m.State}, FirstDraw=${desktop.m.FirstDraw})`);
+          return finish(false, `State pas 3 apres 5s (=${desktop.m.State})`);
         }
-        log(`[${nodeid}] agent pret (${desktop.m.ScreenWidth}x${desktop.m.ScreenHeight} apres ${Date.now()-waitStart}ms)`);
-
-        // Attendre que au moins un frame ait ete dessine (FirstDraw devient false apres draw)
-        const drawWaitStart = Date.now();
-        while (desktop.m.FirstDraw && (Date.now() - drawWaitStart < 5000)) await sleep(100);
-        log(`[${nodeid}] FirstDraw consomme (apres ${Date.now()-drawWaitStart}ms)`);
-
-        await sleep(1000);  // marge supplementaire
+        log(`[${nodeid}] State=${desktop.m.State}, tilesRecus=${desktop.m.tilesReceived || 0}`);
 
         log(`[${nodeid}] envoi Ctrl+Alt+Del`);
         desktop.m.SendCtrlAltDelMsg();
-        await sleep(4000);  // laisser Windows basculer sur l'ecran credentials
+        await sleep(4000);
 
-        // Utilise SendStringUnicode comme le bouton "Ecrire" de MeshCentral
-        log(`[${nodeid}] tape login (${login.length} chars) via SendStringUnicode`);
-        desktop.m.SendStringUnicode(login);
-        await sleep(500);
+        // Envoi char par char avec delais (plus tolerant que SendStringUnicode)
+        log(`[${nodeid}] tape login : "${login}" (${login.length} chars)`);
+        for (let i = 0; i < login.length; i++) {
+          const cp = login.charCodeAt(i);
+          desktop.m.SendKeyUnicode(1, cp);  // down
+          await sleep(30);
+          desktop.m.SendKeyUnicode(2, cp);  // up
+          await sleep(100);
+        }
+        await sleep(400);
 
-        // Tab vers le champ mot de passe
+        log(`[${nodeid}] Tab`);
         desktop.m.SendKeyMsgKC(1, SC_TAB);
-        await sleep(30);
+        await sleep(40);
         desktop.m.SendKeyMsgKC(2, SC_TAB);
         await sleep(500);
 
-        log(`[${nodeid}] tape mot de passe (${pass.length} chars) via SendStringUnicode`);
-        desktop.m.SendStringUnicode(pass);
-        await sleep(500);
+        log(`[${nodeid}] tape mot de passe (${pass.length} chars)`);
+        for (let i = 0; i < pass.length; i++) {
+          const cp = pass.charCodeAt(i);
+          desktop.m.SendKeyUnicode(1, cp);
+          await sleep(30);
+          desktop.m.SendKeyUnicode(2, cp);
+          await sleep(100);
+        }
+        await sleep(400);
 
-        // Enter
+        log(`[${nodeid}] Enter`);
         desktop.m.SendKeyMsgKC(1, SC_ENTER);
-        await sleep(30);
+        await sleep(40);
         desktop.m.SendKeyMsgKC(2, SC_ENTER);
-        await sleep(2000);
+        await sleep(2500);
 
         clearTimeout(timer);
         finish(true, 'sequence envoyee');
