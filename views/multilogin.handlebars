@@ -112,6 +112,25 @@ function findMeshserver() {
   return null;
 }
 
+// Recupere le authCookie (genere par le serveur via meshserver)
+async function getAuthCookie() {
+  // 1. Verifie si MeshCentral l'a deja cache sur window
+  try { if (parent.authCookie) return parent.authCookie; } catch (e) {}
+  try { if (top.authCookie) return top.authCookie; } catch (e) {}
+
+  // 2. Sinon, demande au serveur d'en generer un (la reponse met a jour parent.authCookie)
+  const ms = findMeshserver();
+  if (!ms) return null;
+  try { ms.send({ action: 'authcookie' }); } catch (e) { return null; }
+
+  for (let i = 0; i < 30; i++) {
+    await sleep(100);
+    try { if (parent.authCookie) return parent.authCookie; } catch (e) {}
+    try { if (top.authCookie) return top.authCookie; } catch (e) {}
+  }
+  return null;
+}
+
 // Genere un id de tunnel aleatoire (compatible MeshCentral)
 function makeTunnelId() {
   const arr = new Uint8Array(8);
@@ -119,28 +138,26 @@ function makeTunnelId() {
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function loginOnNode(nodeid, login, pass, log) {
-  return new Promise((resolve) => {
-    const ms = findMeshserver();
-    if (!ms) {
-      log(`[${nodeid}] ERREUR : meshserver introuvable dans parent.*`);
-      return resolve(false);
-    }
+// Protocole KVM dans cette version MeshCentral : p=7 (et non p=2)
+const KVM_PROTOCOL = 7;
 
+async function loginOnNode(nodeid, login, pass, log) {
+  // Recupere l'authcookie avant d'ouvrir le tunnel
+  const authCookie = await getAuthCookie();
+  if (!authCookie) {
+    log(`[${nodeid}] ERREUR : impossible de recuperer authCookie`);
+    return false;
+  }
+
+  return new Promise((resolve) => {
     const tunnelId = makeTunnelId();
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const browserUrl = `${proto}//${location.host}/meshrelay.ashx?browser=1&p=2&nodeid=${encodeURIComponent(nodeid)}&id=${tunnelId}`;
-    const agentUrl = `*/meshrelay.ashx?p=2&nodeid=${encodeURIComponent(nodeid)}&id=${tunnelId}`;
+    const browserUrl = `${proto}//${location.host}/meshrelay.ashx`
+      + `?browser=1&p=${KVM_PROTOCOL}`
+      + `&nodeid=${encodeURIComponent(nodeid)}`
+      + `&id=${tunnelId}`
+      + `&auth=${encodeURIComponent(authCookie)}`;
 
-    // 1. Demande au serveur d'instruire l'agent d'ouvrir son cote du tunnel
-    try {
-      ms.send({ action: 'msg', type: 'tunnel', nodeid: nodeid, value: agentUrl, usage: 2 });
-    } catch (e) {
-      log(`[${nodeid}] ms.send erreur : ${e.message}`);
-      return resolve(false);
-    }
-
-    // 2. Ouvre le cote navigateur
     let ws;
     try { ws = new WebSocket(browserUrl); }
     catch (e) { log(`[${nodeid}] WS exception : ${e}`); return resolve(false); }
@@ -163,10 +180,15 @@ async function loginOnNode(nodeid, login, pass, log) {
 
     ws.onopen = async () => {
       log(`[${nodeid}] WS ouvert, attente connexion agent...`);
-      // Attendre que l'agent ait connecte son cote (premier message recu, ou 3s max)
+      // Attendre que l'agent ait connecte son cote
       const waitStart = Date.now();
-      while (!firstMsgReceived && (Date.now() - waitStart) < 3000) { await sleep(100); }
-      if (!firstMsgReceived) log(`[${nodeid}] aucun message agent apres 3s, on tente quand meme`);
+      while (!firstMsgReceived && (Date.now() - waitStart) < 4000) { await sleep(100); }
+      if (!firstMsgReceived) {
+        log(`[${nodeid}] aucun message agent apres 4s, abandon`);
+        clearTimeout(timer);
+        try { ws.close(); } catch (e) {}
+        return resolve(false);
+      }
 
       sendInit(ws);
       await sleep(500);
