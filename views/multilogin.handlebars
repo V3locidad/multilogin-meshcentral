@@ -112,22 +112,42 @@ function findMeshserver() {
   return null;
 }
 
-// Recupere le authCookie (genere par le serveur via meshserver)
-async function getAuthCookie() {
-  // 1. Verifie si MeshCentral l'a deja cache sur window
-  try { if (parent.authCookie) return parent.authCookie; } catch (e) {}
-  try { if (top.authCookie) return top.authCookie; } catch (e) {}
+// Recupere le RELAY cookie (rcookie) - celui utilise pour meshrelay.ashx
+// Note : MeshCentral stocke deux cookies : authCookie (general) et authRelayCookie/rcookie (relay)
+async function getRelayCookie(log) {
+  // Le vrai KVM utilise authCookie (144 chars), pas authRelayCookie (124 chars)
+  const checkCached = () => {
+    const sources = [];
+    try { sources.push(['parent.authCookie', parent.authCookie]); } catch (e) {}
+    try { sources.push(['top.authCookie', top.authCookie]); } catch (e) {}
+    try { sources.push(['parent.authRelayCookie', parent.authRelayCookie]); } catch (e) {}
+    try { sources.push(['top.authRelayCookie', top.authRelayCookie]); } catch (e) {}
+    for (const [name, val] of sources) {
+      if (val && typeof val === 'string' && val.length > 10) {
+        if (log) log(`>> trouve ${name} (${val.length} chars)`);
+        return val;
+      }
+    }
+    return null;
+  };
 
-  // 2. Sinon, demande au serveur d'en generer un (la reponse met a jour parent.authCookie)
+  // 1. Verifie le cache window
+  let c = checkCached();
+  if (c) return c;
+
+  // 2. Demande au serveur
   const ms = findMeshserver();
-  if (!ms) return null;
+  if (!ms) { if (log) log('>> meshserver introuvable'); return null; }
+  if (log) log('>> demande authcookie au serveur...');
   try { ms.send({ action: 'authcookie' }); } catch (e) { return null; }
 
-  for (let i = 0; i < 30; i++) {
+  // 3. Attend que parent.authCookie / authRelayCookie soit peuple
+  for (let i = 0; i < 40; i++) {
     await sleep(100);
-    try { if (parent.authCookie) return parent.authCookie; } catch (e) {}
-    try { if (top.authCookie) return top.authCookie; } catch (e) {}
+    c = checkCached();
+    if (c) return c;
   }
+  if (log) log('>> aucun cookie trouve apres 4s');
   return null;
 }
 
@@ -142,10 +162,10 @@ function makeTunnelId() {
 const KVM_PROTOCOL = 7;
 
 async function loginOnNode(nodeid, login, pass, log) {
-  // Recupere l'authcookie avant d'ouvrir le tunnel
-  const authCookie = await getAuthCookie();
+  // Recupere le relay cookie
+  const authCookie = await getRelayCookie(log);
   if (!authCookie) {
-    log(`[${nodeid}] ERREUR : impossible de recuperer authCookie`);
+    log(`[${nodeid}] ERREUR : aucun relay cookie disponible`);
     return false;
   }
 
